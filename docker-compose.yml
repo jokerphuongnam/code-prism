@@ -3,7 +3,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      platforms:
+        - "linux/arm64"
+        - "linux/amd64"
     container_name: swift-prism-dev
+    platform: linux/arm64
     volumes:
       - ./core/Sources:/app/core/Sources:ro
       - ./extension/src:/app/extension/src:ro
