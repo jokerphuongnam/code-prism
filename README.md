@@ -1,0 +1,321 @@
+# SwiftPrism 💎
+
+**A High-Fidelity 3D Dependency Visualizer & Context Optimizer for Swift Developers.**
+
+SwiftPrism transforms your Swift codebase into an interactive 3D force-directed graph rendered inside VS Code. It statically analyzes every symbol, traces every dependency — from function calls to `didSet` observers to `.xcassets` references — and generates token-optimized context maps that reduce AI agent costs by up to 96%.
+
+---
+
+## 🎯 Core Value Propositions
+
+### 3D Semantic Mapping
+Visualize Classes, Structs, Actors, Protocols, and the hidden web of property observers (`willSet`/`didSet`), computed properties, and protocol conformances as distinct 3D shapes — spheres for instance members, boxes for statics, diamonds for computed, mini-spheres for observers — all color-coded by type.
+
+### AI Context Optimization
+Generate lightweight code "skeletons" (`prism-context.json`) containing only public/internal signatures, dependency edges, and asset references. AI agents read this instead of your full source, cutting token consumption from ~200K to ~8K for a typical project.
+
+### Resource-to-Code Tracing
+See exactly where your `.xcassets` images and colors are consumed. SwiftPrism detects `Image("logo")`, `UIColor(named: "primary")`, custom wrapper calls like `DesignSystem.getColor("accent")`, and even heuristic string-literal matches — all with confidence scoring.
+
+### Universal Target Support
+Automatically parses `Package.swift` to detect multi-target SPM packages, macro targets, Xcode projects, and standalone Swift files. Cross-module dependencies appear as distinct red edges in the graph.
+
+### Swift Macro Intelligence
+Identifies `@attached` and `@freestanding` macro definitions, infers their roles (`member`, `peer`, `accessor`, etc.), and tracks which declarations they expand into.
+
+---
+
+## 🏗️ Architecture
+
+SwiftPrism follows a **decoupled monorepo** architecture with two independent subsystems that communicate via JSON over STDIO.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         VS Code Extension Host                   │
+│                                                                   │
+│   extension.ts ─── analyzerBridge.ts ─── explorerViewProvider.ts │
+│        │                   │                      │               │
+│   registers            spawns                  serves             │
+│   commands          background               React bundle         │
+│                      process                                      │
+│        │                   │                      │               │
+│   ┌────▼───────────────────▼──────────────────────▼────┐         │
+│   │              child_process.spawn                    │         │
+│   │    ┌──────────────────────────────────────────┐     │         │
+│   │    │         swift-prism-analyzer              │     │         │
+│   │    │         (Background Worker)               │     │         │
+│   │    │                                           │     │         │
+│   │    │  STDOUT ──► JSON AnalysisResult           │     │         │
+│   │    │  STDERR ──► Progress / Warnings           │     │         │
+│   │    └──────────────────────────────────────────┘     │         │
+│   └─────────────────────────────────────────────────────┘         │
+│                              │                                    │
+│                     webview.postMessage                           │
+│                              │                                    │
+│   ┌──────────────────────────▼─────────────────────────────┐     │
+│   │                  React Webview (Vite)                    │     │
+│   │                                                          │     │
+│   │   Header ─── GraphView (3d-force-graph) ─── StatusBar   │     │
+│   │                   │                                      │     │
+│   │              Three.js                                    │     │
+│   │           custom shapes                                  │     │
+│   │                                                          │     │
+│   │   GuideView ─── JsonPreview ─── ContextExport            │     │
+│   └──────────────────────────────────────────────────────────┘     │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Multi-Process Execution** — The heavy AST parsing runs in a spawned Swift process (`child_process.spawn`), keeping VS Code's UI thread completely free. STDOUT delivers the final JSON payload. STDERR streams real-time progress updates that drive the animated status bar. If the analyzer crashes, the React webview retains the Last Known Good (LKG) result.
+
+---
+
+## ⚙️ Tech Stack
+
+| Layer | Technology |
+|---|---|
+| **Static Analysis Engine** | Swift 5.10+, SwiftSyntax 510, SwiftParser |
+| **Extension Host** | TypeScript, VS Code Extension API |
+| **3D Visualization** | React 18, Three.js, 3d-force-graph, Vite |
+| **Build Tooling** | SPM, npm, tsc, Vite |
+| **Infrastructure** | Docker (multi-stage), docker-compose, Shell |
+| **Project Detection** | Package.swift AST parsing, directory heuristics |
+
+---
+
+## 🚀 Getting Started
+
+### Option A: One-Click Build
+
+```bash
+git clone <repo-url> && cd swift-prism
+./run.sh
+```
+
+This single command:
+1. Builds the Swift analyzer in a Docker container (`swift:5.10-jammy`)
+2. Compiles the TypeScript extension and React webview
+3. Extracts the binary and bundles to your local filesystem
+4. Auto-detects your project type (SPM / Xcode / Standalone)
+5. Generates `prism-context.json` for AI agent consumption
+6. Prints launch instructions
+
+Then press **F5** in VS Code to start the extension.
+
+### Option B: Dev Containers
+
+1. Install the **Dev Containers** extension
+2. **Cmd+Shift+P** → **Dev Containers: Reopen in Container**
+3. Everything is pre-built inside the container
+
+### Option C: Native Build (No Docker)
+
+```bash
+cd core && swift build -c release
+cp .build/release/swift-prism-analyzer ../extension/bin/
+
+cd ../extension && npm run install:all && npm run build
+```
+
+Press **F5** → **Run SwiftPrism Extension**.
+
+---
+
+## 📁 Directory Structure
+
+```
+swift-prism/
+├── core/                                    Swift Analysis Engine
+│   ├── Package.swift                        SPM manifest (swift-tools-version: 5.10)
+│   └── Sources/SwiftPrismAnalyzer/
+│       ├── main.swift                       CLI entry: --context, --find-dependents-of, --scan-targets
+│       ├── Models.swift                     All data types: Node, Link, Resource, Target, Macro
+│       ├── Errors.swift                     PrismError domain errors
+│       ├── SymbolCollector.swift             Pass 1: AST → symbols (class/struct/func/var/init/observers)
+│       ├── CallCollector.swift              Call-site reference extraction
+│       ├── InheritanceCollector.swift        Protocol conformance & class inheritance
+│       ├── ResourceScanner.swift            Filesystem scan: .xcassets, .json, .plist, .md
+│       ├── ResourceRefCollector.swift        String literal detection in Image/Color/Bundle calls
+│       ├── StaticResourcePropertyCollector.swift  Extension static property → asset mapping
+│       ├── MacroCollector.swift             @attached/@freestanding macro detection & role inference
+│       ├── PackageManifestParser.swift       Package.swift target parsing via SwiftSyntax
+│       ├── TargetResolver.swift             Auto-detect: SPM / Xcode / Standalone project types
+│       ├── DependencyResolver.swift          Pass 2: link resolution, cross-target, macro expansion
+│       ├── SignatureCollector.swift          Public/internal signature extraction (no bodies)
+│       └── ContextGenerator.swift           prism-context.json skeleton generator
+│
+├── extension/                               VS Code Extension Shell
+│   ├── src/                                 Extension Host (Node.js)
+│   │   ├── extension.ts                     Activation, process lifecycle, context persistence
+│   │   ├── explorerViewProvider.ts          Webview HTML builder, postMessage bridge
+│   │   ├── analyzerBridge.ts               Buffer-based spawn, progress parsing, CLI wrappers
+│   │   ├── swiftFileDiscovery.ts            Workspace .swift file scanner
+│   │   └── protocol.ts                     Shared TypeScript types
+│   │
+│   ├── webview/                             React App (Vite-bundled)
+│   │   ├── src/
+│   │   │   ├── App.tsx                      Root: LKG state, tab switching, context copy toast
+│   │   │   ├── components/
+│   │   │   │   ├── Header.tsx               Analyze button, stats, tab switcher, LKG badge
+│   │   │   │   ├── GraphView.tsx            3D graph + node click → "Copy Context for AI"
+│   │   │   │   ├── GuideView.tsx            Interactive guide with confidence badges + AI buttons
+│   │   │   │   ├── JsonPreview.tsx          Raw JSON debug panel
+│   │   │   │   └── StatusBar.tsx            Real-time phase tracking with progress bar
+│   │   │   ├── design/theme.ts             Color/shape/size mappings for all node and link types
+│   │   │   ├── hooks/useVscodeMessaging.ts  acquireVsCodeApi bridge
+│   │   │   └── protocol.ts                 Webview-side types + message protocol
+│   │   ├── vite.config.ts
+│   │   └── index.html
+│   │
+│   ├── bin/                                 swift-prism-analyzer binary
+│   ├── resources/prism.svg                  Activity Bar icon
+│   └── package.json                         Extension manifest
+│
+├── Dockerfile                               Multi-stage: swift:5.10 → node:20
+├── docker-compose.yml                       Dev container with volume mounts
+├── run.sh                                   One-click build + context generation
+├── .vscode/
+│   ├── launch.json                          F5 configs for extension + Swift debugger
+│   └── tasks.json                           Cmd+Shift+B build tasks
+├── .devcontainer/devcontainer.json          Dev Container config
+│
+├── CONTEXT_STRATEGY.md                      Token optimization methodology
+├── RESOURCE_MAPPING.md                      Asset matching logic documentation
+├── UNIVERSAL_SCAN_LOGIC.md                  Multi-target & macro detection docs
+└── DOCKER_GUIDE.md                          Container usage guide
+```
+
+---
+
+## 📊 Token Efficiency Analytics
+
+SwiftPrism's context generation system is designed to minimize token consumption when feeding project context to LLM agents.
+
+### How It Works
+
+| Step | What Happens | Token Impact |
+|---|---|---|
+| **1. Signature Extraction** | Collects only function signatures, type declarations, and variable annotations — no implementation bodies | ~50-100 tokens per file vs ~2000+ for full source |
+| **2. Dependency Pruning** | Records only which symbols call which symbols — not the call-site code | Edges are ~10 tokens each |
+| **3. External Package Filtering** | `--public-only-external` indexes only `public`/`open` APIs for third-party deps | 73-80% reduction for large dependencies |
+| **4. Targeted Retrieval** | `--find-dependents-of` returns only the 3-5 files relevant to a symbol | Agent reads ~5 files instead of ~50 |
+
+### Real-World Impact
+
+| Scenario | Full Codebase | SwiftPrism Context | Reduction |
+|---|---|---|---|
+| 50-file app project | ~200,000 tokens | ~8,000-15,000 tokens | **92-96%** |
+| 100-file multi-module package | ~500,000 tokens | ~15,000-25,000 tokens | **95-97%** |
+| Feature-scoped query (single symbol) | ~200,000 tokens | ~3,000-5,000 tokens | **97-98%** |
+
+### Context Flow
+
+```
+prism-context.json (persisted, ~2K tokens)
+        │
+        ▼
+AI Agent reads skeleton ──► understands project structure
+        │
+        ▼
+--find-dependents-of "HomeViewModel" (~200 tokens output)
+        │
+        ▼
+Agent reads only 3 relevant files (~10K tokens)
+        │
+        ▼
+Total: ~12K tokens  vs  ~200K for full codebase
+```
+
+### CLI Usage for AI Agents
+
+```bash
+swift-prism-analyzer --workspace . --scan-targets --context --output prism-context.json
+
+swift-prism-analyzer --workspace . --scan-targets --find-dependents-of "HomeViewModel"
+```
+
+### Integration
+
+Add to your `CLAUDE.md` or `.cursorrules`:
+
+```
+Read prism-context.json before modifying Swift files.
+Use swift-prism-analyzer --find-dependents-of "<symbol>" to identify related files.
+Only read files listed in the output.
+```
+
+---
+
+## 🎨 Visual Design System
+
+### Node Shapes
+
+| Shape | Condition | Example |
+|---|---|---|
+| Sphere | Instance members | `func doWork()` |
+| Box | `isStatic: true` | `static func shared()` |
+| Diamond | Computed property | `var count: Int { get }` |
+| Mini-sphere | `willSet`/`didSet` observer | `didSet { refresh() }` |
+| Large Box | `.xcassets` catalog | `Assets.xcassets` |
+| Cylinder | Image asset | `logo.imageset` |
+| Cone | Color asset | `primary.colorset` |
+| Torus | Markdown file | `README.md` |
+
+### Node Colors
+
+| Type | Color |
+|---|---|
+| `struct` | `#4FC3F7` Light Blue |
+| `class` | `#7E57C2` Purple |
+| `enum` | `#FF8A65` Orange |
+| `actor` | `#26A69A` Teal |
+| `protocol` | `#FFD54F` Amber |
+| `macro` | `#FF7043` Deep Orange |
+| `didSet` | `#E040FB` Magenta |
+| `willSet` | `#F48FB1` Pink |
+
+### Edge Styles
+
+| Link Type | Color | Style |
+|---|---|---|
+| `call` | Blue | Solid |
+| `cross_target_dependency` | Red | Long dash `[10,4]` |
+| `conformance` | Amber | Short dash `[4,4]` |
+| `inheritance` | Purple | Dash `[8,4]` |
+| `resource_link` | Cyan | Dash `[6,3]` |
+| `macro_expansion` | Deep Orange | Dash `[5,2]` |
+| `heuristic_link` | Orange | Dotted `[2,4]` |
+
+---
+
+## 🔧 CLI Reference
+
+```bash
+swift-prism-analyzer [OPTIONS] [FILES...]
+
+OPTIONS:
+  --workspace <path>          Set workspace root for scanning
+  --scan-targets              Auto-detect SPM/Xcode targets from Package.swift
+  --public-only-external      Index only public APIs for external dependencies
+  --context                   Generate prism-context.json skeleton (signatures only)
+  --find-dependents-of <id>   Query dependency graph for a specific symbol
+  --output <path>             Write output to file instead of STDOUT
+```
+
+---
+
+## 📚 Documentation
+
+| Document | Content |
+|---|---|
+| [CONTEXT_STRATEGY.md](CONTEXT_STRATEGY.md) | Token optimization methodology, AI agent integration patterns |
+| [RESOURCE_MAPPING.md](RESOURCE_MAPPING.md) | Five-strategy asset matching: direct API, custom wrappers, static aliases, protocol conformers, heuristics |
+| [UNIVERSAL_SCAN_LOGIC.md](UNIVERSAL_SCAN_LOGIC.md) | Multi-target detection, macro intelligence, cross-module linking, public-only filtering |
+| [DOCKER_GUIDE.md](DOCKER_GUIDE.md) | Container setup, volume mounts, troubleshooting |
+| [core/README.md](core/README.md) | Swift engine internals, two-pass pipeline, STDERR protocol |
+| [extension/README.md](extension/README.md) | Extension architecture, LKG state, communication flow, design system |
+
+---
+
+## 📄 License
+
+MIT

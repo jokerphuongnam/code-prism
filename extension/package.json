@@ -1,0 +1,62 @@
+{
+  "name": "swift-prism",
+  "displayName": "SwiftPrism",
+  "description": "Function-level dependency extraction and 3D visualization for Swift codebases",
+  "version": "0.1.0",
+  "publisher": "swift-prism",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Programming Languages", "Visualization"],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "swiftPrismContainer",
+          "title": "SwiftPrism",
+          "icon": "resources/prism.svg"
+        }
+      ]
+    },
+    "views": {
+      "swiftPrismContainer": [
+        {
+          "id": "swiftPrismExplorer",
+          "name": "SwiftPrism Explorer",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "swiftPrism.analyzeProject",
+        "title": "SwiftPrism: Analyze Project",
+        "icon": "$(play)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "swiftPrism.analyzeProject",
+          "when": "view == swiftPrismExplorer",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "compile": "tsc -p ./",
+    "compile:webview": "cd webview && npm run build",
+    "build": "npm run compile && npm run compile:webview",
+    "watch": "tsc -watch -p ./",
+    "install:all": "npm install && cd webview && npm install"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.0"
+  }
+}
