@@ -17,7 +17,8 @@
       "Bash(bash -n /Users/phuongnam/Documents/New/swift-prism/run.sh)",
       "Bash(find /Users/phuongnam/Documents/New/swift-prism -name *.xcodeproj -o -name *.xcworkspace)",
       "Bash(git init:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(./run.sh)"
     ],
     "additionalDirectories": [
       "/Users/phuongnam/Documents/New/swift-prism"

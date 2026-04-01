@@ -1,4 +1,8 @@
-FROM swift:5.10-jammy AS swift-builder
+FROM --platform=$BUILDPLATFORM swift:5.10-jammy AS swift-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libsqlite3-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 
@@ -12,10 +16,11 @@ RUN swift build -c release \
     -Xlinker -s \
     && mv .build/release/swift-prism-analyzer /usr/local/bin/swift-prism-analyzer
 
-FROM node:20-jammy AS final
+FROM --platform=$TARGETPLATFORM node:20-slim AS final
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libcurl4 \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
