@@ -28,6 +28,8 @@ const RESOURCE_COLORS: Record<ResourceType, string> = {
   json_file: "#FFA726",
   plist_file: "#8D6E63",
   markdown_file: "#26C6DA",
+  strings_file: "#AED581",
+  localization: "#81C784",
   other_file: "#BDBDBD",
 };
 
@@ -71,6 +73,9 @@ export function resourceShape(resourceType: ResourceType): NodeShape {
       return "diamond";
     case "markdown_file":
       return "torus";
+    case "strings_file":
+    case "localization":
+      return "mini-sphere";
     default:
       return "box";
   }
@@ -101,7 +106,12 @@ export function resourceSize(resourceType: ResourceType): number {
       return 12;
     case "image_set":
     case "color_set":
-      return 6;
+      return 4;
+    case "data_set":
+      return 4;
+    case "strings_file":
+    case "localization":
+      return 3;
     default:
       return 5;
   }
@@ -118,6 +128,8 @@ const LINK_COLORS: Record<LinkType, string> = {
   heuristic_link: "#FFB74D",
   cross_target_dependency: "#EF5350",
   macro_expansion: "#FF7043",
+  extension_contribution: "#42A5F5",
+  nesting: "#B0BEC5",
 };
 
 export function linkColor(type: LinkType): string {
@@ -141,6 +153,10 @@ export function linkDashArray(type: LinkType): number[] | null {
       return [10, 4];
     case "macro_expansion":
       return [5, 2];
+    case "extension_contribution":
+      return [6, 4];
+    case "nesting":
+      return null;
     default:
       return null;
   }
@@ -158,6 +174,10 @@ export function linkWidth(type: LinkType): number {
       return 2.5;
     case "macro_expansion":
       return 1.5;
+    case "extension_contribution":
+      return 1.5;
+    case "nesting":
+      return 3;
     case "heuristic_link":
       return 1;
     default:

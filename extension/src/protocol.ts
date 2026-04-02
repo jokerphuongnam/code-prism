@@ -35,7 +35,9 @@ export type LinkType =
   | "resource_alias"
   | "heuristic_link"
   | "cross_target_dependency"
-  | "macro_expansion";
+  | "macro_expansion"
+  | "extension_contribution"
+  | "nesting";
 
 export type LinkConfidence = "high" | "medium" | "low";
 
@@ -47,6 +49,8 @@ export type ResourceType =
   | "json_file"
   | "plist_file"
   | "markdown_file"
+  | "strings_file"
+  | "localization"
   | "other_file";
 
 export type TargetType =
@@ -71,10 +75,15 @@ export interface PrismNode {
   flavor: SymbolFlavor;
   subKind: SymbolSubKind | null;
   isStatic: boolean;
+  isGlobal: boolean;
+  isNested: boolean;
   access: AccessLevel;
   parent: string | null;
+  parentFile: string | null;
+  sourceFile: string;
   location: SourceLocation;
   targetName: string | null;
+  memberCount: number | null;
 }
 
 export interface ResourceNode {
@@ -82,6 +91,7 @@ export interface ResourceNode {
   name: string;
   resourceType: ResourceType;
   catalogName: string | null;
+  parentGroup: string | null;
   filePath: string;
 }
 
@@ -103,11 +113,28 @@ export interface MacroNode {
   targetName: string | null;
 }
 
+export interface CallSiteRef {
+  line: number;
+  column: number;
+  snippet: string;
+  file: string;
+}
+
 export interface PrismLink {
   source_id: string;
   target_id: string;
   type: LinkType;
   confidence: LinkConfidence | null;
+  references: CallSiteRef[] | null;
+}
+
+export interface ModuleNode {
+  id: string;
+  name: string;
+  moduleType: TargetType;
+  isMacro: boolean;
+  symbolCount: number;
+  publicSymbolCount: number;
 }
 
 export interface AnalysisResult {
@@ -116,6 +143,7 @@ export interface AnalysisResult {
   resources: ResourceNode[];
   targets: TargetInfo[];
   macros: MacroNode[];
+  moduleNodes: ModuleNode[] | null;
 }
 
 export type AnalysisPhase =

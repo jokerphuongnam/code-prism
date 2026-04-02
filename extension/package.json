@@ -34,6 +34,24 @@
         "command": "swiftPrism.analyzeProject",
         "title": "SwiftPrism: Analyze Project",
         "icon": "$(play)"
+      },
+      {
+        "command": "swiftPrism.refresh",
+        "title": "SwiftPrism: Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "swiftPrism.showRawJson",
+        "title": "SwiftPrism: View Raw JSON",
+        "icon": "$(json)"
+      },
+      {
+        "command": "swiftPrism.analyzeAndShowJson",
+        "title": "SwiftPrism: Analyze & View JSON"
+      },
+      {
+        "command": "swiftPrism.clearCache",
+        "title": "SwiftPrism: Clear Cache"
       }
     ],
     "menus": {
@@ -41,7 +59,17 @@
         {
           "command": "swiftPrism.analyzeProject",
           "when": "view == swiftPrismExplorer",
-          "group": "navigation"
+          "group": "navigation@1"
+        },
+        {
+          "command": "swiftPrism.refresh",
+          "when": "view == swiftPrismExplorer",
+          "group": "navigation@2"
+        },
+        {
+          "command": "swiftPrism.showRawJson",
+          "when": "view == swiftPrismExplorer",
+          "group": "navigation@3"
         }
       ]
     }

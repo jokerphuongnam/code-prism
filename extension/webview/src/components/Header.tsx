@@ -5,20 +5,24 @@ interface HeaderProps {
   result: AnalysisResult | null;
   loading: boolean;
   onAnalyze: () => void;
+  onViewRawJson: () => void;
   activeTab: ViewTab;
   onTabChange: (tab: ViewTab) => void;
   isLkg: boolean;
   hasResources: boolean;
+  jsonLoading: boolean;
 }
 
 export function Header({
   result,
   loading,
   onAnalyze,
+  onViewRawJson,
   activeTab,
   onTabChange,
   isLkg,
   hasResources,
+  jsonLoading,
 }: HeaderProps) {
   const resourceCount = result?.resources?.length ?? 0;
 
@@ -31,6 +35,14 @@ export function Header({
           disabled={loading}
         >
           {loading ? "Analyzing…" : "▶ Analyze Project"}
+        </button>
+        <button
+          style={styles.jsonButton}
+          onClick={onViewRawJson}
+          disabled={jsonLoading || loading}
+          title="Analyze project and open raw JSON in a new editor tab"
+        >
+          {jsonLoading ? "Analyzing…" : "View Raw JSON"}
         </button>
         {result && (
           <span style={styles.stats}>
@@ -78,7 +90,7 @@ const styles: Record<string, React.CSSProperties> = {
   left: {
     display: "flex",
     alignItems: "center",
-    gap: 12,
+    gap: 8,
   },
   analyzeButton: {
     background: "var(--vscode-button-background)",
@@ -90,6 +102,19 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: "var(--vscode-font-family)",
     fontSize: "var(--vscode-font-size)",
     fontWeight: 600,
+  },
+  jsonButton: {
+    background: "var(--vscode-button-secondaryBackground, #3A3D41)",
+    color: "var(--vscode-button-secondaryForeground, #ccc)",
+    border: "none",
+    borderRadius: 4,
+    padding: "6px 10px",
+    cursor: "pointer",
+    fontFamily: "var(--vscode-editor-font-family)",
+    fontSize: "var(--vscode-font-size)",
+    fontWeight: 600,
+    minWidth: 34,
+    textAlign: "center" as const,
   },
   stats: {
     opacity: 0.7,
