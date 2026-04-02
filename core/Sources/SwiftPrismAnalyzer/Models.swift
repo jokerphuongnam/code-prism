@@ -6,6 +6,16 @@ struct AnalysisResult: Encodable {
     let resources: [ResourceNode]
     let targets: [TargetInfo]
     let macros: [MacroNode]
+    let moduleNodes: [ModuleNode]?
+}
+
+struct ModuleNode: Encodable {
+    let id: String
+    let name: String
+    let moduleType: TargetType
+    let isMacro: Bool
+    let symbolCount: Int
+    let publicSymbolCount: Int
 }
 
 struct Node: Encodable {
@@ -14,10 +24,15 @@ struct Node: Encodable {
     let flavor: SymbolFlavor
     let subKind: SymbolSubKind?
     let isStatic: Bool
+    let isGlobal: Bool
+    let isNested: Bool
     let access: AccessLevel
     let parent: String?
+    let parentFile: String?
+    let sourceFile: String
     let location: SourceLocation
     let targetName: String?
+    let memberCount: Int?
 }
 
 struct ResourceNode: Encodable {
@@ -25,6 +40,7 @@ struct ResourceNode: Encodable {
     let name: String
     let resourceType: ResourceType
     let catalogName: String?
+    let parentGroup: String?
     let filePath: String
 }
 
@@ -46,17 +62,26 @@ struct MacroNode: Encodable {
     let targetName: String?
 }
 
+struct CallSiteRef: Encodable {
+    let line: Int
+    let column: Int
+    let snippet: String
+    let file: String
+}
+
 struct Link: Encodable {
     let sourceId: String
     let targetId: String
     let type: LinkType
     let confidence: LinkConfidence?
+    let references: [CallSiteRef]?
 
     enum CodingKeys: String, CodingKey {
         case sourceId = "source_id"
         case targetId = "target_id"
         case type
         case confidence
+        case references
     }
 }
 
@@ -107,6 +132,8 @@ enum LinkType: String, Encodable {
     case heuristicLink = "heuristic_link"
     case crossTargetDependency = "cross_target_dependency"
     case macroExpansion = "macro_expansion"
+    case extensionContribution = "extension_contribution"
+    case nesting
 }
 
 enum LinkConfidence: String, Encodable {
@@ -123,6 +150,8 @@ enum ResourceType: String, Encodable {
     case jsonFile = "json_file"
     case plistFile = "plist_file"
     case markdownFile = "markdown_file"
+    case stringsFile = "strings_file"
+    case localization = "localization"
     case otherFile = "other_file"
 }
 
@@ -160,6 +189,10 @@ struct SymbolInfo {
     let flavor: SymbolFlavor
     let subKind: SymbolSubKind?
     let isStatic: Bool
+    let isGlobal: Bool
+    let isNested: Bool
+    let parentFile: String?
+    let sourceFile: String
     let access: AccessLevel
     let parent: String?
     let location: SourceLocation
@@ -170,6 +203,10 @@ struct CallRef {
     let callee: String
     let isQualified: Bool
     let qualifier: String?
+    let line: Int
+    let column: Int
+    let snippet: String
+    let file: String
 }
 
 struct ResourceRef {
@@ -196,4 +233,18 @@ struct ParsedTarget {
     let path: String
     let sourcePaths: [String]
     let dependencies: [String]
+}
+
+struct FlatMapEntry: Encodable {
+    let id: String
+    let name: String
+    let type: String
+    let location: FlatLocation
+    let connections: [String]
+}
+
+struct FlatLocation: Encodable {
+    let file: String
+    let line: Int
+    let col: Int
 }

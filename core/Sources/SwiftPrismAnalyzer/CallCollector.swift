@@ -4,9 +4,11 @@ final class CallCollector: SyntaxVisitor {
 
     private(set) var calls: [CallRef] = []
     let knownSymbols: Set<String>
+    private let filePath: String
 
-    init(knownSymbols: Set<String>) {
+    init(knownSymbols: Set<String>, filePath: String = "") {
         self.knownSymbols = knownSymbols
+        self.filePath = filePath
         super.init(viewMode: .sourceAccurate)
     }
 
@@ -14,10 +16,14 @@ final class CallCollector: SyntaxVisitor {
         if let memberAccess = node.calledExpression.as(MemberAccessExprSyntax.self) {
             let method = memberAccess.declName.baseName.text
             let qualifier = memberAccess.base?.trimmedDescription
-            calls.append(CallRef(callee: method, isQualified: true, qualifier: qualifier))
+            let loc = sourceLocation(of: node)
+            let snippet = node.trimmedDescription.prefix(80)
+            calls.append(CallRef(callee: method, isQualified: true, qualifier: qualifier, line: loc.line, column: loc.column, snippet: String(snippet), file: filePath))
         } else if let identExpr = node.calledExpression.as(DeclReferenceExprSyntax.self) {
             let name = identExpr.baseName.text
-            calls.append(CallRef(callee: name, isQualified: false, qualifier: nil))
+            let loc = sourceLocation(of: node)
+            let snippet = node.trimmedDescription.prefix(80)
+            calls.append(CallRef(callee: name, isQualified: false, qualifier: nil, line: loc.line, column: loc.column, snippet: String(snippet), file: filePath))
         }
         return .visitChildren
     }
@@ -28,7 +34,15 @@ final class CallCollector: SyntaxVisitor {
         }
         let member = node.declName.baseName.text
         let qualifier = node.base?.trimmedDescription
-        calls.append(CallRef(callee: member, isQualified: true, qualifier: qualifier))
+        let loc = sourceLocation(of: node)
+        let snippet = node.trimmedDescription.prefix(80)
+        calls.append(CallRef(callee: member, isQualified: true, qualifier: qualifier, line: loc.line, column: loc.column, snippet: String(snippet), file: filePath))
         return .visitChildren
+    }
+
+    private func sourceLocation(of node: some SyntaxProtocol) -> SourceLocation {
+        let converter = SourceLocationConverter(fileName: filePath, tree: node.root)
+        let loc = converter.location(for: node.positionAfterSkippingLeadingTrivia)
+        return SourceLocation(file: filePath, line: loc.line, column: loc.column)
     }
 }

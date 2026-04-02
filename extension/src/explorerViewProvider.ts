@@ -2,10 +2,13 @@ import * as vscode from "vscode";
 import * as path from "path";
 import * as fs from "fs";
 import type { AnalysisResult, ProgressInfo } from "./protocol";
+import type { FlatMapEntry } from "./analyzerBridge";
 
 interface WebviewToHostMessage {
-  type: "analyzeRequest" | "copyContext" | "ready";
+  type: "analyzeRequest" | "copyContext" | "openFile" | "requestRawJson" | "requestMembers" | "requestFilePreview" | "ready";
+  filePath?: string;
   nodeId?: string;
+  data?: { file: string; line: number; col: number };
 }
 
 export class ExplorerViewProvider implements vscode.WebviewViewProvider {
@@ -14,6 +17,10 @@ export class ExplorerViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private onAnalyzeRequest?: () => void;
   private onCopyContext?: (nodeId: string) => void;
+  private onOpenFile?: (data: { file: string; line: number; col: number }) => void;
+  private onRequestRawJson?: () => void;
+  private onRequestMembers?: (nodeId: string) => void;
+  private onRequestFilePreview?: (nodeId: string, filePath: string) => void;
 
   constructor(private readonly extensionUri: vscode.Uri) {}
 
@@ -23,6 +30,22 @@ export class ExplorerViewProvider implements vscode.WebviewViewProvider {
 
   setCopyContextHandler(handler: (nodeId: string) => void): void {
     this.onCopyContext = handler;
+  }
+
+  setOpenFileHandler(handler: (data: { file: string; line: number; col: number }) => void): void {
+    this.onOpenFile = handler;
+  }
+
+  setRequestRawJsonHandler(handler: () => void): void {
+    this.onRequestRawJson = handler;
+  }
+
+  setRequestMembersHandler(handler: (nodeId: string) => void): void {
+    this.onRequestMembers = handler;
+  }
+
+  setRequestFilePreviewHandler(handler: (nodeId: string, filePath: string) => void): void {
+    this.onRequestFilePreview = handler;
   }
 
   resolveWebviewView(
@@ -46,6 +69,18 @@ export class ExplorerViewProvider implements vscode.WebviewViewProvider {
       if (msg.type === "copyContext" && msg.nodeId && this.onCopyContext) {
         this.onCopyContext(msg.nodeId);
       }
+      if (msg.type === "openFile" && msg.data && this.onOpenFile) {
+        this.onOpenFile(msg.data);
+      }
+      if (msg.type === "requestRawJson" && this.onRequestRawJson) {
+        this.onRequestRawJson();
+      }
+      if (msg.type === "requestMembers" && msg.nodeId && this.onRequestMembers) {
+        this.onRequestMembers(msg.nodeId);
+      }
+      if (msg.type === "requestFilePreview" && msg.nodeId && msg.filePath && this.onRequestFilePreview) {
+        this.onRequestFilePreview(msg.nodeId, msg.filePath);
+      }
     });
 
     webviewView.webview.html = this.buildHtml(webviewView.webview);
@@ -61,6 +96,18 @@ export class ExplorerViewProvider implements vscode.WebviewViewProvider {
 
   sendError(message: string): void {
     this.view?.webview.postMessage({ type: "error", message });
+  }
+
+  sendMappingData(entries: FlatMapEntry[]): void {
+    this.view?.webview.postMessage({ type: "mappingData", payload: entries });
+  }
+
+  sendMemberDetail(parentId: string, result: AnalysisResult): void {
+    this.view?.webview.postMessage({ type: "memberDetail", parentId, payload: result });
+  }
+
+  sendFilePreview(preview: { nodeId: string; previewType: string; data: string; fileName: string }): void {
+    this.view?.webview.postMessage({ type: "filePreview", payload: preview });
   }
 
   sendContextCopied(tokenEstimate: number): void {

@@ -1,5 +1,11 @@
-import { useState, useCallback, useRef } from "react";
-import type { AnalysisResult, HostToWebviewMessage, ProgressInfo } from "./protocol";
+import { useState, useCallback, useRef, useMemo } from "react";
+import type {
+  AnalysisResult,
+  HostToWebviewMessage,
+  ProgressInfo,
+  FlatMapEntry,
+  FilePreview,
+} from "./protocol";
 import { useVscodeMessaging, usePostMessage } from "./hooks/useVscodeMessaging";
 import { Header } from "./components/Header";
 import { GraphView } from "./components/GraphView";
@@ -11,13 +17,57 @@ export type ViewTab = "graph" | "json" | "guide";
 
 const IDLE_PROGRESS: ProgressInfo = { phase: "idle", processed: 0, total: 0 };
 
+function flatMapToAnalysisResult(entries: FlatMapEntry[]): AnalysisResult {
+  const nodes = entries.map((e) => ({
+    id: e.id,
+    name: e.name,
+    flavor: e.type as AnalysisResult["nodes"][number]["flavor"],
+    subKind: null,
+    isStatic: false,
+    isGlobal: !e.id.includes("."),
+    isNested: false,
+    access: "internal" as const,
+    parent: e.id.includes(".") ? e.id.split(".").slice(0, -1).join(".") : null,
+    parentFile: !e.id.includes(".") ? e.location.file.split("/").pop() ?? null : null,
+    sourceFile: e.location.file.split("/").pop() ?? e.location.file,
+    location: { file: e.location.file, line: e.location.line, column: e.location.col },
+    targetName: null,
+    memberCount: null,
+  }));
+
+  const nodeIds = new Set(entries.map((e) => e.id));
+  const links = entries.flatMap((e) =>
+    e.connections
+      .filter((targetId) => nodeIds.has(targetId))
+      .map((targetId) => ({
+        source_id: e.id,
+        target_id: targetId,
+        type: "call" as const,
+        confidence: null,
+        references: null,
+      }))
+  );
+
+  return {
+    nodes,
+    links,
+    resources: [],
+    targets: [],
+    macros: [],
+    moduleNodes: null,
+  };
+}
+
 export function App() {
   const [result, setResult] = useState<AnalysisResult | null>(null);
+  const [flatEntries, setFlatEntries] = useState<FlatMapEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<ProgressInfo>(IDLE_PROGRESS);
   const [activeTab, setActiveTab] = useState<ViewTab>("graph");
   const [highlightedIds, setHighlightedIds] = useState<Set<string>>(new Set());
   const [contextToast, setContextToast] = useState<string | null>(null);
+  const [jsonLoading, setJsonLoading] = useState(false);
+  const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
   const postMessage = usePostMessage();
 
   const lkgResult = useRef<AnalysisResult | null>(null);
@@ -25,10 +75,19 @@ export function App() {
   const handleMessage = useCallback((msg: HostToWebviewMessage) => {
     switch (msg.type) {
       case "analysisResult":
+        console.log(`[SwiftPrism] Received analysisResult: ${msg.payload.nodes.length} nodes, ${msg.payload.links.length} links, ${msg.payload.resources?.length ?? 0} resources`);
         lkgResult.current = msg.payload;
         setResult(msg.payload);
+        setFlatEntries(null);
         setError(null);
         setProgress({ phase: "complete", processed: 1, total: 1 });
+        break;
+      case "mappingData":
+        console.log(`[SwiftPrism] Received mappingData: ${msg.payload.length} entries`);
+        setFlatEntries(msg.payload);
+        setError(null);
+        setProgress({ phase: "complete", processed: 1, total: 1 });
+        setJsonLoading(false);
         break;
       case "progress":
         setProgress(msg.progress);
@@ -41,6 +100,23 @@ export function App() {
           setResult(lkgResult.current);
         }
         break;
+      case "memberDetail":
+        setResult((prev) => {
+          if (!prev) return prev;
+          const existingIds = new Set(prev.nodes.map((n) => n.id));
+          const newNodes = msg.payload.nodes.filter((n) => !existingIds.has(n.id));
+          const existingLinkKeys = new Set(prev.links.map((l) => `${l.source_id}->${l.target_id}`));
+          const newLinks = msg.payload.links.filter((l) => !existingLinkKeys.has(`${l.source_id}->${l.target_id}`));
+          return {
+            ...prev,
+            nodes: [...prev.nodes, ...newNodes],
+            links: [...prev.links, ...newLinks],
+          };
+        });
+        break;
+      case "filePreview":
+        setFilePreview(msg.payload);
+        break;
       case "contextCopied":
         setContextToast(`Context copied (~${msg.tokenEstimate} tokens)`);
         setTimeout(() => setContextToast(null), 3000);
@@ -50,12 +126,39 @@ export function App() {
 
   useVscodeMessaging(handleMessage);
 
+  const displayResult = useMemo(() => {
+    if (flatEntries) return flatMapToAnalysisResult(flatEntries);
+    return result;
+  }, [result, flatEntries]);
+
   const handleAnalyze = useCallback(() => {
     postMessage({ type: "analyzeRequest" });
   }, [postMessage]);
 
   const handleCopyContext = useCallback((nodeId: string) => {
     postMessage({ type: "copyContext", nodeId });
+  }, [postMessage]);
+
+  const handleOpenFile = useCallback((location: { file: string; line: number; col: number }) => {
+    postMessage({ type: "openFile", data: location });
+  }, [postMessage]);
+
+  const handleRequestMembers = useCallback((nodeId: string) => {
+    postMessage({ type: "requestMembers", nodeId });
+  }, [postMessage]);
+
+  const handleRequestFilePreview = useCallback((nodeId: string, filePath: string) => {
+    postMessage({ type: "requestFilePreview", nodeId, filePath });
+  }, [postMessage]);
+
+  const handleClearPreview = useCallback(() => {
+    setFilePreview(null);
+  }, []);
+
+  const handleViewRawJson = useCallback(() => {
+    setJsonLoading(true);
+    postMessage({ type: "requestRawJson" });
+    setTimeout(() => setJsonLoading(false), 5000);
   }, [postMessage]);
 
   const handleGuideHighlight = useCallback((ids: Set<string>) => {
@@ -70,7 +173,6 @@ export function App() {
     progress.phase !== "complete" &&
     progress.phase !== "error";
 
-  const displayResult = result;
   const isLkg = error !== null && displayResult !== null;
   const hasResources = (displayResult?.resources?.length ?? 0) > 0;
 
@@ -80,10 +182,12 @@ export function App() {
         result={displayResult}
         loading={isAnalyzing}
         onAnalyze={handleAnalyze}
+        onViewRawJson={handleViewRawJson}
         activeTab={activeTab}
         onTabChange={setActiveTab}
         isLkg={isLkg}
         hasResources={hasResources}
+        jsonLoading={jsonLoading}
       />
       {error && <div style={styles.error}>{error}</div>}
       {contextToast && <div style={styles.toast}>{contextToast}</div>}
@@ -93,6 +197,11 @@ export function App() {
             result={displayResult}
             highlightedIds={highlightedIds}
             onCopyContext={handleCopyContext}
+            onOpenFile={handleOpenFile}
+            onRequestMembers={handleRequestMembers}
+            onRequestFilePreview={handleRequestFilePreview}
+            onClearPreview={handleClearPreview}
+            filePreview={filePreview}
           />
         )}
         {activeTab === "json" && <JsonPreview result={displayResult} />}

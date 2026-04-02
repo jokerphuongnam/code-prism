@@ -1,11 +1,14 @@
-import { spawn, type ChildProcess } from "child_process";
+import { spawn, execFile, type ChildProcess } from "child_process";
 import * as path from "path";
+import * as fs from "fs";
 import type { AnalysisResult, ProgressInfo } from "./protocol";
 
 export class AnalyzerError extends Error {
-  constructor(message: string) {
+  public readonly stderr: string;
+  constructor(message: string, stderr: string = "") {
     super(message);
     this.name = "AnalyzerError";
+    this.stderr = stderr;
   }
 }
 
@@ -14,8 +17,71 @@ export interface AnalyzerCallbacks {
   onWarning: (message: string) => void;
 }
 
+export interface FlatMapEntry {
+  id: string;
+  name: string;
+  type: string;
+  location: { file: string; line: number; col: number };
+  connections: string[];
+}
+
 export function resolveAnalyzerBinary(extensionPath: string): string {
   return path.join(extensionPath, "bin", "swift-prism-analyzer");
+}
+
+export function runSwiftAnalyzerToPath(
+  binaryPath: string,
+  projectPath: string,
+  outputPath: string
+): Promise<FlatMapEntry[]> {
+  const outputDir = path.dirname(outputPath);
+  if (!fs.existsSync(outputDir)) {
+    fs.mkdirSync(outputDir, { recursive: true });
+  }
+
+  return new Promise((resolve, reject) => {
+    execFile(
+      binaryPath,
+      [projectPath, outputPath],
+      { timeout: 300_000, maxBuffer: 50 * 1024 * 1024 },
+      (error, _stdout, stderr) => {
+        if (error) {
+          const parsed = extractErrorMessage(stderr) || error.message;
+          reject(new AnalyzerError(`Analyzer failed: ${parsed}`, stderr));
+          return;
+        }
+
+        if (!fs.existsSync(outputPath)) {
+          reject(new AnalyzerError(`Analyzer completed but output file not found: ${outputPath}`, stderr));
+          return;
+        }
+
+        let raw: string;
+        try {
+          raw = fs.readFileSync(outputPath, "utf-8");
+        } catch (readErr) {
+          reject(new AnalyzerError(`Cannot read output file: ${readErr}`, stderr));
+          return;
+        }
+
+        if (!raw.trim()) {
+          reject(new AnalyzerError("Analyzer produced an empty output file", stderr));
+          return;
+        }
+
+        try {
+          const entries: FlatMapEntry[] = JSON.parse(raw);
+          if (!Array.isArray(entries)) {
+            reject(new AnalyzerError("Analyzer output is valid JSON but not an array", stderr));
+            return;
+          }
+          resolve(entries);
+        } catch {
+          reject(new AnalyzerError(`Invalid JSON in output file. Preview: ${raw.slice(0, 200)}`, stderr));
+        }
+      }
+    );
+  });
 }
 
 export function runAnalyzer(
@@ -43,28 +109,66 @@ export function runAnalyzer(
 
   const promise = new Promise<AnalysisResult>((resolve, reject) => {
     child.on("error", (err) => {
-      reject(new AnalyzerError(`Failed to launch analyzer: ${err.message}`));
+      reject(new AnalyzerError(`Failed to launch analyzer: ${err.message}`, stderrText));
     });
 
     child.on("close", (code) => {
       if (code !== 0) {
-        reject(new AnalyzerError(extractErrorMessage(stderrText) || `Analyzer exited with code ${code}`));
+        const parsed = extractErrorMessage(stderrText);
+        reject(new AnalyzerError(parsed || `Analyzer exited with code ${code}`, stderrText));
         return;
       }
       const output = Buffer.concat(stdoutBuffers).toString("utf-8");
       if (!output.trim()) {
-        reject(new AnalyzerError("Analyzer returned empty output"));
+        reject(new AnalyzerError("Analyzer returned empty output", stderrText));
         return;
       }
       try {
         resolve(JSON.parse(output));
       } catch {
-        reject(new AnalyzerError("Failed to parse analyzer JSON output"));
+        const preview = output.slice(0, 200);
+        reject(new AnalyzerError(`Invalid JSON from analyzer. Preview: ${preview}`, stderrText));
       }
     });
   });
 
   return { promise, process: child };
+}
+
+export function runSummaryAnalysis(
+  binaryPath: string,
+  args: string[],
+  callbacks: AnalyzerCallbacks
+): { promise: Promise<AnalysisResult>; process: ChildProcess } {
+  return runAnalyzer(binaryPath, [...args, "--summary-only"], callbacks);
+}
+
+export function runMembersOf(
+  binaryPath: string,
+  parentId: string,
+  args: string[]
+): Promise<AnalysisResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(binaryPath, [...args, "--members-of", parentId], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const buffers: Buffer[] = [];
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => buffers.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+    child.on("error", (err) => reject(new AnalyzerError(err.message, stderr)));
+    child.on("close", (code) => {
+      if (code !== 0) {
+        reject(new AnalyzerError(extractErrorMessage(stderr) || `Members query failed (code ${code})`, stderr));
+        return;
+      }
+      try {
+        resolve(JSON.parse(Buffer.concat(buffers).toString("utf-8")));
+      } catch {
+        reject(new AnalyzerError("Failed to parse members JSON", stderr));
+      }
+    });
+  });
 }
 
 export async function runContextGenerator(
@@ -78,10 +182,10 @@ export async function runContextGenerator(
     const child = spawn(binaryPath, args, { stdio: ["ignore", "ignore", "pipe"] });
     let stderr = "";
     child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
-    child.on("error", (err) => reject(new AnalyzerError(err.message)));
+    child.on("error", (err) => reject(new AnalyzerError(err.message, stderr)));
     child.on("close", (code) => {
       if (code !== 0) {
-        reject(new AnalyzerError(extractErrorMessage(stderr) || `Context generation failed (code ${code})`));
+        reject(new AnalyzerError(extractErrorMessage(stderr) || `Context generation failed (code ${code})`, stderr));
       } else {
         resolve();
       }
@@ -99,19 +203,19 @@ export async function runFindDependents(
     const args = ["--workspace", workspacePath, "--find-dependents-of", targetId, ...swiftFiles];
     const child = spawn(binaryPath, args, { stdio: ["ignore", "pipe", "pipe"] });
     const buffers: Buffer[] = [];
-    child.stdout.on("data", (chunk: Buffer) => buffers.push(chunk));
     let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => buffers.push(chunk));
     child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
-    child.on("error", (err) => reject(new AnalyzerError(err.message)));
+    child.on("error", (err) => reject(new AnalyzerError(err.message, stderr)));
     child.on("close", (code) => {
       if (code !== 0) {
-        reject(new AnalyzerError(extractErrorMessage(stderr) || `Find dependents failed (code ${code})`));
+        reject(new AnalyzerError(extractErrorMessage(stderr) || `Find dependents failed (code ${code})`, stderr));
         return;
       }
       try {
         resolve(JSON.parse(Buffer.concat(buffers).toString("utf-8")));
       } catch {
-        reject(new AnalyzerError("Failed to parse dependents JSON"));
+        reject(new AnalyzerError("Failed to parse dependents JSON", stderr));
       }
     });
   });

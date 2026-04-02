@@ -37,18 +37,29 @@ struct DependencyResolver {
                 }
 
                 guard let bodyNode = bodyFinder.bodies[symbol.id] else { continue }
-                let collector = CallCollector(knownSymbols: knownNames)
+                let collector = CallCollector(knownSymbols: knownNames, filePath: filePath)
                 collector.walk(bodyNode)
+
+                var refsByTarget: [String: [CallSiteRef]] = [:]
 
                 for call in collector.calls {
                     guard let targetID = nameToID[call.callee], targetID != symbol.id else { continue }
+                    refsByTarget[targetID, default: []].append(CallSiteRef(
+                        line: call.line,
+                        column: call.column,
+                        snippet: call.snippet,
+                        file: call.file
+                    ))
+                }
+
+                for (targetID, refs) in refsByTarget {
                     let sourceTarget = symbolTargetMap[symbol.id]
                     let destTarget = symbolTargetMap[targetID]
                     let isCrossTarget = sourceTarget != nil && destTarget != nil && sourceTarget != destTarget
-                    let linkType: LinkType = isCrossTarget ? .crossTargetDependency : determineLinkType(call: call, targetID: targetID)
+                    let linkType: LinkType = isCrossTarget ? .crossTargetDependency : determineLinkType(call: CallRef(callee: "", isQualified: false, qualifier: nil, line: 0, column: 0, snippet: "", file: ""), targetID: targetID)
                     let key = "\(symbol.id)->\(targetID):\(linkType.rawValue)"
                     if seen.insert(key).inserted {
-                        links.append(Link(sourceId: symbol.id, targetId: targetID, type: linkType, confidence: nil))
+                        links.append(Link(sourceId: symbol.id, targetId: targetID, type: linkType, confidence: nil, references: refs))
                     }
                 }
 
@@ -65,7 +76,7 @@ struct DependencyResolver {
                     let linkType: LinkType = ref.callContext.hasPrefix("heuristic") ? .heuristicLink : .resourceLink
                     let key = "\(symbol.id)->\(targetID):\(linkType.rawValue)"
                     if seen.insert(key).inserted {
-                        links.append(Link(sourceId: symbol.id, targetId: targetID, type: linkType, confidence: ref.confidence))
+                        links.append(Link(sourceId: symbol.id, targetId: targetID, type: linkType, confidence: ref.confidence, references: nil))
                     }
                 }
             }
@@ -76,7 +87,7 @@ struct DependencyResolver {
                 guard let targetID = resourceNameToID[alias.resourceName] else { continue }
                 let key = "\(alias.symbolId)->\(targetID):resource_alias"
                 if seen.insert(key).inserted {
-                    links.append(Link(sourceId: alias.symbolId, targetId: targetID, type: .resourceAlias, confidence: .high))
+                    links.append(Link(sourceId: alias.symbolId, targetId: targetID, type: .resourceAlias, confidence: .high, references: nil))
                 }
             }
 
@@ -91,7 +102,7 @@ struct DependencyResolver {
                         guard let targetID = resourceNameToID[ref.resourceName] else { continue }
                         let key = "\(member.id)->\(targetID):resource_link:provider"
                         if seen.insert(key).inserted {
-                            links.append(Link(sourceId: member.id, targetId: targetID, type: .resourceLink, confidence: .high))
+                            links.append(Link(sourceId: member.id, targetId: targetID, type: .resourceLink, confidence: .high, references: nil))
                         }
                     }
                 }
@@ -103,7 +114,7 @@ struct DependencyResolver {
                 if macroNameSet.contains(app.macroName) {
                     let key = "\(app.symbolId)->\(app.macroName):macro_expansion"
                     if seen.insert(key).inserted {
-                        links.append(Link(sourceId: app.macroName, targetId: app.symbolId, type: .macroExpansion, confidence: .high))
+                        links.append(Link(sourceId: app.macroName, targetId: app.symbolId, type: .macroExpansion, confidence: .high, references: nil))
                     }
                 }
             }
@@ -113,7 +124,7 @@ struct DependencyResolver {
             for ref in inheritanceCollector.refs {
                 let key = "\(ref.declId)->\(ref.inheritedName):\(ref.linkType.rawValue)"
                 if seen.insert(key).inserted {
-                    links.append(Link(sourceId: ref.declId, targetId: ref.inheritedName, type: ref.linkType, confidence: nil))
+                    links.append(Link(sourceId: ref.declId, targetId: ref.inheritedName, type: ref.linkType, confidence: nil, references: nil))
                 }
             }
         }
@@ -126,7 +137,7 @@ struct DependencyResolver {
                 return true
             }
             .map {
-                Node(id: $0.id, name: $0.name, flavor: $0.flavor, subKind: $0.subKind, isStatic: $0.isStatic, access: $0.access, parent: $0.parent, location: $0.location, targetName: $0.targetName)
+                Node(id: $0.id, name: $0.name, flavor: $0.flavor, subKind: $0.subKind, isStatic: $0.isStatic, isGlobal: $0.isGlobal, isNested: $0.isNested, access: $0.access, parent: $0.parent, parentFile: $0.parentFile, sourceFile: $0.sourceFile, location: $0.location, targetName: $0.targetName, memberCount: nil)
             }
 
         let targetInfos = targets.map {
@@ -137,7 +148,37 @@ struct DependencyResolver {
             MacroNode(id: $0.id, name: $0.name, macroType: $0.macroType, role: $0.role, conformances: $0.conformances, generatedSymbols: findGeneratedSymbols(macroName: $0.name, links: links), location: $0.location, targetName: $0.targetName)
         }
 
-        return AnalysisResult(nodes: nodes, links: links, resources: resources, targets: targetInfos, macros: macroNodes)
+        var primaryFileForType: [String: String] = [:]
+        for sym in symbols {
+            let isTypeDecl = [SymbolFlavor.struct, .class, .enum, .actor, .protocol].contains(sym.flavor)
+            if isTypeDecl && sym.parent == nil {
+                if primaryFileForType[sym.name] == nil {
+                    primaryFileForType[sym.name] = sym.sourceFile
+                }
+            }
+        }
+
+        for sym in symbols {
+            guard sym.isNested, let parent = sym.parent else { continue }
+            let key = "\(parent)->\(sym.id):nesting"
+            if seen.insert(key).inserted {
+                links.append(Link(sourceId: parent, targetId: sym.id, type: .nesting, confidence: nil, references: nil))
+            }
+        }
+
+        var extensionContributions: Set<String> = []
+        for sym in symbols {
+            guard let parent = sym.parent else { continue }
+            guard let primaryFile = primaryFileForType[parent] else { continue }
+            if sym.sourceFile != primaryFile {
+                let key = "file:\(sym.sourceFile)->type:\(parent)"
+                if extensionContributions.insert(key).inserted {
+                    links.append(Link(sourceId: "file:\(sym.sourceFile)", targetId: parent, type: .extensionContribution, confidence: nil, references: nil))
+                }
+            }
+        }
+
+        return AnalysisResult(nodes: nodes, links: links, resources: resources, targets: targetInfos, macros: macroNodes, moduleNodes: nil)
     }
 
     private func findGeneratedSymbols(macroName: String, links: [Link]) -> [String] {
@@ -205,7 +246,7 @@ struct DependencyResolver {
 
         let key = "\(varID)->\(symbol.id):observer_trigger"
         if seen.insert(key).inserted {
-            links.append(Link(sourceId: varID, targetId: symbol.id, type: .observerTrigger, confidence: nil))
+            links.append(Link(sourceId: varID, targetId: symbol.id, type: .observerTrigger, confidence: nil, references: nil))
         }
     }
 }
