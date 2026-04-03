@@ -62,6 +62,14 @@ export function activate(context: vscode.ExtensionContext) {
   const cache = new CacheManager(context.globalStorageUri);
   cache.pruneStale();
 
+  const workspaceRoot = getWorkspaceRoot();
+  if (workspaceRoot) {
+    const cleaned = cache.cleanupWorkspaceArtifacts(workspaceRoot.fsPath);
+    if (cleaned > 0) {
+      outputChannel.appendLine(`[cleanup] Removed ${cleaned} old artifact(s) from workspace root`);
+    }
+  }
+
   const runQuickAnalysis = async () => {
     const workspaceRoot = getWorkspaceRoot();
     if (!workspaceRoot) {
@@ -327,6 +335,9 @@ export function activate(context: vscode.ExtensionContext) {
   viewProvider.setRequestRawJsonHandler(handleRequestRawJson);
   viewProvider.setRequestMembersHandler(handleRequestMembers);
   viewProvider.setRequestFilePreviewHandler(handleFilePreview);
+  viewProvider.setWebviewErrorHandler((message) => {
+    outputChannel.appendLine(`[webview error] ${message}`);
+  });
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(ExplorerViewProvider.viewType, viewProvider)

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { AnalysisResult } from "../protocol";
 import type { ViewTab } from "../App";
 
@@ -13,141 +14,160 @@ interface HeaderProps {
   jsonLoading: boolean;
 }
 
-export function Header({
-  result,
-  loading,
-  onAnalyze,
-  onViewRawJson,
-  activeTab,
-  onTabChange,
-  isLkg,
-  hasResources,
-  jsonLoading,
-}: HeaderProps) {
-  const resourceCount = result?.resources?.length ?? 0;
-
+function IconButton({ icon, label, onClick, disabled, active }: {
+  icon: string; label: string; onClick: () => void; disabled?: boolean; active?: boolean;
+}) {
+  const [hovered, setHovered] = useState(false);
   return (
-    <header style={styles.header}>
-      <div style={styles.left}>
-        <button
-          style={styles.analyzeButton}
-          onClick={onAnalyze}
-          disabled={loading}
-        >
-          {loading ? "Analyzing…" : "▶ Analyze Project"}
-        </button>
-        <button
-          style={styles.jsonButton}
-          onClick={onViewRawJson}
-          disabled={jsonLoading || loading}
-          title="Analyze project and open raw JSON in a new editor tab"
-        >
-          {jsonLoading ? "Analyzing…" : "View Raw JSON"}
-        </button>
-        {result && (
-          <span style={styles.stats}>
-            {result.nodes.length} symbols · {result.links.length} links
-            {resourceCount > 0 && ` · ${resourceCount} resources`}
-            {isLkg && <span style={styles.lkg}> (cached)</span>}
-          </span>
-        )}
-      </div>
-      <div style={styles.tabs}>
-        <button
-          style={activeTab === "graph" ? styles.activeTab : styles.tab}
-          onClick={() => onTabChange("graph")}
-        >
-          3D Graph
-        </button>
-        <button
-          style={activeTab === "json" ? styles.activeTab : styles.tab}
-          onClick={() => onTabChange("json")}
-        >
-          JSON
-        </button>
-        {hasResources && (
-          <button
-            style={activeTab === "guide" ? styles.activeTab : styles.tab}
-            onClick={() => onTabChange("guide")}
-          >
-            Guide
-          </button>
-        )}
-      </div>
-    </header>
+    <div style={{ position: "relative", display: "inline-flex" }}>
+      <button
+        style={{
+          ...s.iconBtn,
+          opacity: disabled ? 0.3 : active ? 1 : 0.7,
+          background: active ? "rgba(255,255,255,0.12)" : "transparent",
+        }}
+        onClick={onClick}
+        disabled={disabled}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        title={label}
+      >
+        {icon}
+      </button>
+      {hovered && !disabled && (
+        <div style={s.tooltip}>{label}</div>
+      )}
+    </div>
   );
 }
 
-const styles: Record<string, React.CSSProperties> = {
-  header: {
+export function Header({
+  result, loading, onAnalyze, onViewRawJson, activeTab, onTabChange, isLkg, hasResources, jsonLoading,
+}: HeaderProps) {
+  const nodeCount = result?.nodes.length ?? 0;
+  const linkCount = result?.links.length ?? 0;
+  const resourceCount = result?.resources?.length ?? 0;
+
+  return (
+    <>
+      <div style={s.actionBar}>
+        <IconButton
+          icon={loading ? "\u23F3" : "\u25B6"}
+          label={loading ? "Analyzing\u2026" : "Analyze Project"}
+          onClick={onAnalyze}
+          disabled={loading}
+        />
+        <IconButton
+          icon="{}"
+          label="View Raw JSON"
+          onClick={onViewRawJson}
+          disabled={jsonLoading || loading}
+        />
+        <div style={s.divider} />
+        <IconButton icon="\u{1F4CA}" label="3D Graph" onClick={() => onTabChange("graph")} active={activeTab === "graph"} />
+        <IconButton icon="\u{1F4DD}" label="JSON Preview" onClick={() => onTabChange("json")} active={activeTab === "json"} />
+        {hasResources && (
+          <IconButton icon="\u{1F4D6}" label="Guide" onClick={() => onTabChange("guide")} active={activeTab === "guide"} />
+        )}
+      </div>
+
+      {result && (
+        <div style={s.statsBar}>
+          <span style={s.statsText}>
+            {nodeCount} nodes
+            <span style={s.statsDot}>{"\u00B7"}</span>
+            {linkCount} links
+            {resourceCount > 0 && (
+              <>
+                <span style={s.statsDot}>{"\u00B7"}</span>
+                {resourceCount} resources
+              </>
+            )}
+            {isLkg && <span style={s.lkg}> (cached)</span>}
+          </span>
+        </div>
+      )}
+    </>
+  );
+}
+
+const GLASS = {
+  background: "rgba(30, 30, 30, 0.65)",
+  backdropFilter: "blur(12px)",
+  WebkitBackdropFilter: "blur(12px)",
+  border: "1px solid rgba(255, 255, 255, 0.08)",
+  borderRadius: 10,
+  boxShadow: "0 4px 20px rgba(0, 0, 0, 0.35)",
+};
+
+const s: Record<string, React.CSSProperties> = {
+  actionBar: {
+    position: "absolute",
+    top: 8,
+    right: 50,
+    zIndex: 20,
     display: "flex",
-    justifyContent: "space-between",
     alignItems: "center",
-    padding: "8px 12px",
-    borderBottom: "1px solid var(--vscode-panel-border)",
-    flexShrink: 0,
+    gap: 2,
+    padding: "3px 6px",
+    ...GLASS,
   },
-  left: {
+  iconBtn: {
+    width: 30,
+    height: 30,
     display: "flex",
     alignItems: "center",
-    gap: 8,
-  },
-  analyzeButton: {
-    background: "var(--vscode-button-background)",
-    color: "var(--vscode-button-foreground)",
+    justifyContent: "center",
     border: "none",
-    borderRadius: 4,
-    padding: "6px 14px",
+    borderRadius: 6,
     cursor: "pointer",
+    fontSize: "0.85em",
+    color: "rgba(255, 255, 255, 0.85)",
+    background: "transparent",
+    transition: "background 0.12s, opacity 0.12s",
     fontFamily: "var(--vscode-font-family)",
-    fontSize: "var(--vscode-font-size)",
-    fontWeight: 600,
   },
-  jsonButton: {
-    background: "var(--vscode-button-secondaryBackground, #3A3D41)",
-    color: "var(--vscode-button-secondaryForeground, #ccc)",
-    border: "none",
-    borderRadius: 4,
-    padding: "6px 10px",
-    cursor: "pointer",
-    fontFamily: "var(--vscode-editor-font-family)",
-    fontSize: "var(--vscode-font-size)",
-    fontWeight: 600,
-    minWidth: 34,
-    textAlign: "center" as const,
+  divider: {
+    width: 1,
+    height: 18,
+    background: "rgba(255, 255, 255, 0.1)",
+    margin: "0 4px",
   },
-  stats: {
-    opacity: 0.7,
-    fontSize: "0.9em",
+  tooltip: {
+    position: "absolute",
+    top: "100%",
+    left: "50%",
+    transform: "translateX(-50%)",
+    marginTop: 6,
+    padding: "3px 8px",
+    fontSize: "0.65em",
+    color: "rgba(255, 255, 255, 0.8)",
+    whiteSpace: "nowrap" as const,
+    pointerEvents: "none" as const,
+    ...GLASS,
+    borderRadius: 6,
+  },
+  statsBar: {
+    position: "absolute",
+    bottom: 8,
+    left: 8,
+    zIndex: 15,
+    padding: "4px 10px",
+    ...GLASS,
+    borderRadius: 8,
+  },
+  statsText: {
+    fontSize: "0.65em",
+    color: "rgba(255, 255, 255, 0.5)",
+    fontFamily: "var(--vscode-font-family)",
+    letterSpacing: "0.02em",
+  },
+  statsDot: {
+    margin: "0 5px",
+    opacity: 0.3,
   },
   lkg: {
-    color: "var(--vscode-editorWarning-foreground, #FFD54F)",
+    color: "#FFD54F",
     fontStyle: "italic",
-  },
-  tabs: {
-    display: "flex",
-    gap: 4,
-  },
-  tab: {
-    background: "transparent",
-    color: "var(--vscode-foreground)",
-    border: "1px solid var(--vscode-panel-border)",
-    borderRadius: 4,
-    padding: "4px 10px",
-    cursor: "pointer",
-    fontFamily: "var(--vscode-font-family)",
-    fontSize: "0.85em",
-    opacity: 0.6,
-  },
-  activeTab: {
-    background: "var(--vscode-badge-background)",
-    color: "var(--vscode-badge-foreground)",
-    border: "1px solid transparent",
-    borderRadius: 4,
-    padding: "4px 10px",
-    cursor: "pointer",
-    fontFamily: "var(--vscode-font-family)",
-    fontSize: "0.85em",
-    opacity: 1,
   },
 };

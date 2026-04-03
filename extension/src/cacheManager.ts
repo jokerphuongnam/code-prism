@@ -30,6 +30,18 @@ export class CacheManager {
     return path.join(this.cacheDir, `${hash}_mapping.json`);
   }
 
+  cleanupWorkspaceArtifacts(workspaceRoot: string): number {
+    const artifacts = ["prism-context.json", "analysis_results.json", "mapping.json"];
+    let cleaned = 0;
+    for (const name of artifacts) {
+      const filePath = path.join(workspaceRoot, name);
+      if (fs.existsSync(filePath)) {
+        try { fs.unlinkSync(filePath); cleaned++; } catch { /* skip */ }
+      }
+    }
+    return cleaned;
+  }
+
   clearAll(): number {
     if (!fs.existsSync(this.cacheDir)) return 0;
     const files = fs.readdirSync(this.cacheDir).filter((f) => f.endsWith(".json"));

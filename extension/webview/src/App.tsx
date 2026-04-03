@@ -26,6 +26,7 @@ function flatMapToAnalysisResult(entries: FlatMapEntry[]): AnalysisResult {
     isStatic: false,
     isGlobal: !e.id.includes("."),
     isNested: false,
+    isInteresting: true,
     access: "internal" as const,
     parent: e.id.includes(".") ? e.id.split(".").slice(0, -1).join(".") : null,
     parentFile: !e.id.includes(".") ? e.location.file.split("/").pop() ?? null : null,
@@ -49,6 +50,7 @@ function flatMapToAnalysisResult(entries: FlatMapEntry[]): AnalysisResult {
   );
 
   return {
+    projectRoot: null,
     nodes,
     links,
     resources: [],
@@ -74,14 +76,23 @@ export function App() {
 
   const handleMessage = useCallback((msg: HostToWebviewMessage) => {
     switch (msg.type) {
-      case "analysisResult":
-        console.log(`[SwiftPrism] Received analysisResult: ${msg.payload.nodes.length} nodes, ${msg.payload.links.length} links, ${msg.payload.resources?.length ?? 0} resources`);
-        lkgResult.current = msg.payload;
-        setResult(msg.payload);
+      case "analysisResult": {
+        const p = msg.payload;
+        console.log(`[SwiftPrism] Received analysisResult: ${p.nodes.length} nodes, ${p.links.length} links, ${p.resources?.length ?? 0} resources`);
+        if (p.nodes.length > 0) {
+          const ids = new Set(p.nodes.map((n) => n.id));
+          const broken = p.links.filter((l) => !ids.has(l.source_id) || !ids.has(l.target_id));
+          if (broken.length > 0) console.warn(`[SwiftPrism] ${broken.length} links reference missing node IDs`);
+          console.log("[SwiftPrism] Sample nodes:", p.nodes.slice(0, 3).map((n) => `${n.id} [${n.flavor}]`));
+          console.log("[SwiftPrism] Sample links:", p.links.slice(0, 3).map((l) => `${l.source_id} -> ${l.target_id}`));
+        }
+        lkgResult.current = p;
+        setResult(p);
         setFlatEntries(null);
         setError(null);
         setProgress({ phase: "complete", processed: 1, total: 1 });
         break;
+      }
       case "mappingData":
         console.log(`[SwiftPrism] Received mappingData: ${msg.payload.length} entries`);
         setFlatEntries(msg.payload);
@@ -178,17 +189,6 @@ export function App() {
 
   return (
     <div style={styles.root}>
-      <Header
-        result={displayResult}
-        loading={isAnalyzing}
-        onAnalyze={handleAnalyze}
-        onViewRawJson={handleViewRawJson}
-        activeTab={activeTab}
-        onTabChange={setActiveTab}
-        isLkg={isLkg}
-        hasResources={hasResources}
-        jsonLoading={jsonLoading}
-      />
       {error && <div style={styles.error}>{error}</div>}
       {contextToast && <div style={styles.toast}>{contextToast}</div>}
       <main style={styles.main}>
@@ -213,6 +213,17 @@ export function App() {
           />
         )}
       </main>
+      <Header
+        result={displayResult}
+        loading={isAnalyzing}
+        onAnalyze={handleAnalyze}
+        onViewRawJson={handleViewRawJson}
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        isLkg={isLkg}
+        hasResources={hasResources}
+        jsonLoading={jsonLoading}
+      />
       <StatusBar progress={progress} />
     </div>
   );
@@ -248,7 +259,8 @@ const styles: Record<string, React.CSSProperties> = {
     textAlign: "center" as const,
   },
   main: {
-    flex: 1,
+    width: "100%",
+    height: "100%",
     overflow: "hidden",
     position: "relative",
   },

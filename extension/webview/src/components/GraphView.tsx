@@ -41,6 +41,7 @@ interface GraphNode {
   isMacroModule: boolean;
   isGlobal: boolean;
   isFileNode: boolean;
+  isInteresting: boolean;
   hidden: boolean;
   parentId: string | null;
   parentFile: string | null;
@@ -88,6 +89,10 @@ const LINK_TYPE_LABELS: Record<LinkType, string> = {
   macro_expansion: "Macros",
   extension_contribution: "Extensions",
   nesting: "Nesting",
+  environment_injection: "Env Injection",
+  environment_provider: "Env Provider",
+  holds_type: "Holds",
+  enum_usage: "Uses Enum",
 };
 
 const SHAPE_GLYPHS: Record<NodeShape, string> = {
@@ -183,7 +188,7 @@ function buildFullNodeList(
       isModule: false,
       isMacroModule: false,
       isGlobal: false,
-      isFileNode: true,
+      isFileNode: true, isInteresting: true,
       hidden: false,
       parentId: null,
       parentFile: null,
@@ -214,7 +219,7 @@ function buildFullNodeList(
       isModule,
       isMacroModule: moduleInfo?.isMacro ?? false,
       isGlobal: n.isGlobal,
-      isFileNode: false,
+      isFileNode: false, isInteresting: n.isInteresting,
       hidden: false,
       parentId: n.parent,
       parentFile: n.parentFile ?? null,
@@ -244,7 +249,7 @@ function buildFullNodeList(
         isModule: false,
         isMacroModule: false,
         isGlobal: false,
-        isFileNode: false,
+        isFileNode: false, isInteresting: true,
       hidden: false,
         parentId: r.parentGroup,
         parentFile: null,
@@ -268,7 +273,10 @@ function computeVisibility(
 ): Set<string> {
   const visible = new Set<string>();
   if (!collapsed) {
-    for (const n of allNodes) visible.add(n.id);
+    for (const n of allNodes) {
+      if (n.flavor === "variable" && !n.isHighlighted && !n.isInteresting) continue;
+      visible.add(n.id);
+    }
     return visible;
   }
   for (const n of allNodes) {
@@ -473,13 +481,65 @@ function createSpriteTexture(n: GraphNode, lod: "full" | "dot"): THREE.SpriteMat
   return material;
 }
 
-function createNodeSprite(n: GraphNode): THREE.Sprite {
+function createNodeSprite(n: GraphNode): THREE.Group {
+  const group = new THREE.Group();
+
   const material = createSpriteTexture(n, n.isGlobal ? "dot" : "full");
   const sprite = new THREE.Sprite(material);
   const scale = n.isGlobal ? n.size * 1.2 : n.size * 1.8;
   sprite.scale.set(scale, scale, 1);
-  sprite.userData = { currentLod: n.isGlobal ? "dot" : "full" };
-  return sprite;
+  group.add(sprite);
+
+  const hitRadius = Math.max(scale * 1.5, 6);
+  const hitGeo = new THREE.SphereGeometry(hitRadius, 6, 4);
+  const hitMat = new THREE.MeshBasicMaterial({ visible: false });
+  const hitMesh = new THREE.Mesh(hitGeo, hitMat);
+  group.add(hitMesh);
+
+  group.userData = {
+    currentLod: n.isGlobal ? "dot" : "full",
+    baseScale: scale,
+    sprite,
+  };
+  return group;
+}
+
+function highlightNeighbors(nodeId: string, graph: ForceGraph3DInstance) {
+  const data = graph.graphData();
+  const neighborIds = new Set<string>();
+  for (const l of data.links as GraphLink[]) {
+    const src = typeof l.source === "object" ? (l.source as GraphNode).id : l.source;
+    const tgt = typeof l.target === "object" ? (l.target as GraphNode).id : l.target;
+    if (src === nodeId) neighborIds.add(tgt);
+    if (tgt === nodeId) neighborIds.add(src);
+  }
+  for (const n of data.nodes as GraphNode[]) {
+    if (!neighborIds.has(n.id)) continue;
+    const g = n.__threeObj as THREE.Group | undefined;
+    if (g?.userData?.sprite) {
+      const s = g.userData.baseScale * 1.2;
+      g.userData.sprite.scale.set(s, s, 1);
+    }
+  }
+}
+
+function restoreNeighborHighlight(nodeId: string, graph: ForceGraph3DInstance) {
+  const data = graph.graphData();
+  const neighborIds = new Set<string>();
+  for (const l of data.links as GraphLink[]) {
+    const src = typeof l.source === "object" ? (l.source as GraphNode).id : l.source;
+    const tgt = typeof l.target === "object" ? (l.target as GraphNode).id : l.target;
+    if (src === nodeId) neighborIds.add(tgt);
+    if (tgt === nodeId) neighborIds.add(src);
+  }
+  for (const n of data.nodes as GraphNode[]) {
+    if (!neighborIds.has(n.id)) continue;
+    const g = n.__threeObj as THREE.Group | undefined;
+    if (g?.userData?.sprite) {
+      const s = g.userData.baseScale;
+      g.userData.sprite.scale.set(s, s, 1);
+    }
+  }
 }
 
 function FilterPanel({
@@ -710,11 +770,12 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
 
         if (prevNode) {
           const prev = prevNode as GraphNode;
-          const prevObj = prev.__threeObj as THREE.Sprite | undefined;
-          if (prevObj) {
-            const baseScale = prev.isGlobal ? prev.size * 1.2 : prev.size * 1.8;
-            prevObj.scale.set(baseScale, baseScale, 1);
+          const prevGroup = prev.__threeObj as THREE.Group | undefined;
+          if (prevGroup?.userData?.sprite) {
+            const base = prevGroup.userData.baseScale;
+            prevGroup.userData.sprite.scale.set(base, base, 1);
           }
+          restoreNeighborHighlight(prev.id, graph);
         }
 
         if (!node) {
@@ -726,11 +787,12 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
         }
         const n = node as GraphNode;
 
-        const obj = n.__threeObj as THREE.Sprite | undefined;
-        if (obj) {
-          const hoverScale = (n.isGlobal ? n.size * 1.2 : n.size * 1.8) * 1.35;
-          obj.scale.set(hoverScale, hoverScale, 1);
+        const group = n.__threeObj as THREE.Group | undefined;
+        if (group?.userData?.sprite) {
+          const hoverScale = group.userData.baseScale * 1.5;
+          group.userData.sprite.scale.set(hoverScale, hoverScale, 1);
         }
+        highlightNeighbors(n.id, graph);
 
         const screen = graph.graph2ScreenCoords(n.x ?? 0, n.y ?? 0, n.z ?? 0);
         setHoverPos({ x: screen.x, y: screen.y });
@@ -932,8 +994,9 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
       const currentNodes = graphRef.current.graphData().nodes as GraphNode[];
 
       for (const node of currentNodes) {
-        const obj = node.__threeObj as THREE.Sprite | undefined;
-        if (!obj || !obj.userData) continue;
+        const group = node.__threeObj as THREE.Group | undefined;
+        if (!group?.userData?.sprite) continue;
+        const spr = group.userData.sprite as THREE.Sprite;
 
         const nx = node.x ?? 0;
         const ny = node.y ?? 0;
@@ -945,21 +1008,23 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
 
         if (node.isGlobal) {
           const wantLod = dist < LOD_NEAR * 0.6 ? "full" : "dot";
-          if (wantLod !== obj.userData.currentLod) {
-            obj.material = createSpriteTexture(node, wantLod);
+          if (wantLod !== group.userData.currentLod) {
+            spr.material = createSpriteTexture(node, wantLod);
             const scale = wantLod === "dot" ? node.size * 1.2 : node.size * 2.5;
-            obj.scale.set(scale, scale, 1);
-            obj.userData.currentLod = wantLod;
+            spr.scale.set(scale, scale, 1);
+            group.userData.currentLod = wantLod;
+            group.userData.baseScale = scale;
           }
           continue;
         }
 
-        const wantLod = dist < LOD_NEAR ? "full" : dist > LOD_FAR ? "dot" : obj.userData.currentLod;
-        if (wantLod !== obj.userData.currentLod) {
-          obj.material = createSpriteTexture(node, wantLod);
+        const wantLod = dist < LOD_NEAR ? "full" : dist > LOD_FAR ? "dot" : group.userData.currentLod;
+        if (wantLod !== group.userData.currentLod) {
+          spr.material = createSpriteTexture(node, wantLod);
           const scale = wantLod === "dot" ? node.size * 0.8 : node.size * 1.8;
-          obj.scale.set(scale, scale, 1);
-          obj.userData.currentLod = wantLod;
+          spr.scale.set(scale, scale, 1);
+          group.userData.currentLod = wantLod;
+          group.userData.baseScale = scale;
         }
       }
 

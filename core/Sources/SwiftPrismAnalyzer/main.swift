@@ -6,6 +6,8 @@ enum RunMode {
     case analyze
     case context
     case findDependents(String)
+    case fullSummary
+    case focus(String)
     case directScan(projectPath: String, outputPath: String)
 }
 
@@ -172,6 +174,10 @@ func runFlagMode(_ args: [String]) throws {
             membersOfId = args[i + 1]; i += 2
         case "--collapse-modules":
             collapseModulesFlag = true; i += 1
+        case "--full-summary":
+            mode = .fullSummary; i += 1
+        case "--focus" where i + 1 < args.count:
+            mode = .focus(args[i + 1]); i += 2
         default:
             filePaths.append(args[i]); i += 1
         }
@@ -252,6 +258,18 @@ func runFlagMode(_ args: [String]) throws {
         result = fullResult
     }
 
+    if let root = workspaceRoot {
+        result = AnalysisResult(
+            projectRoot: root,
+            nodes: result.nodes,
+            links: result.links,
+            resources: result.resources,
+            targets: result.targets,
+            macros: result.macros,
+            moduleNodes: result.moduleNodes
+        )
+    }
+
     if collapseModulesFlag && !targets.isEmpty {
         result = collapseModules(result: result, targets: targets)
     }
@@ -275,11 +293,231 @@ func runFlagMode(_ args: [String]) throws {
         let json = try safeEncodeToJSON(dependents, label: "Dependents")
         writeOutput(json, to: outputPath)
 
+    case .fullSummary:
+        let summary = generateFullSummary(result: fullResult)
+        let json = try safeEncodeToJSON(summary, label: "FullSummary")
+        writeOutput(json, to: outputPath)
+
+    case .focus(let rootId):
+        let focus = generateFocusAnalysis(rootId: rootId, result: fullResult)
+        let json = try safeEncodeToJSON(focus, label: "FocusAnalysis")
+        writeOutput(json, to: outputPath)
+
     case .directScan:
         break
     }
 
     emitProgress(phase: "complete", processed: 1, total: 1)
+}
+
+func generateFocusAnalysis(rootId: String, result: AnalysisResult) -> FocusAnalysis {
+    let nodeById = Dictionary(result.nodes.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+    let topLevelFlavors: Set<String> = ["struct", "class", "enum", "actor", "protocol"]
+
+    var outgoing: [String: [String]] = [:]
+    for link in result.links {
+        outgoing[link.sourceId, default: []].append(link.targetId)
+    }
+
+    var required: [String: Int] = [:]
+    var queue: [(id: String, depth: Int)] = [(rootId, 0)]
+    required[rootId] = 0
+
+    if let rootNode = nodeById[rootId], topLevelFlavors.contains(rootNode.flavor.rawValue) {
+        for child in result.nodes where child.parent == rootId {
+            if required[child.id] == nil {
+                required[child.id] = 1
+                queue.append((child.id, 1))
+            }
+        }
+    }
+
+    while !queue.isEmpty {
+        let (currentId, depth) = queue.removeFirst()
+        let deps = outgoing[currentId] ?? []
+        for dep in deps {
+            if required[dep] == nil {
+                required[dep] = depth + 1
+                queue.append((dep, depth + 1))
+
+                if let depNode = nodeById[dep], topLevelFlavors.contains(depNode.flavor.rawValue) {
+                    for child in result.nodes where child.parent == dep {
+                        if required[child.id] == nil {
+                            required[child.id] = depth + 2
+                            queue.append((child.id, depth + 2))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let requiredSymbols = required.sorted { $0.value < $1.value }.compactMap { (id, depth) -> FocusSymbol? in
+        guard let node = nodeById[id] else { return nil }
+        let isStub = depth > 3 && (node.flavor == .function || node.flavor == .initializer)
+        return FocusSymbol(
+            id: id,
+            name: node.name,
+            flavor: node.flavor.rawValue,
+            depth: depth,
+            sourceFile: node.sourceFile,
+            isStub: isStub
+        )
+    }
+
+    let requiredFiles = Array(Set(requiredSymbols.map(\.sourceFile))).sorted()
+
+    let allFiles = Array(Set(result.nodes.map(\.sourceFile))).sorted()
+    let redundant = result.nodes.filter { required[$0.id] == nil }.map(\.id).sorted()
+
+    var blastRadius: [String: [String]] = [:]
+    for sym in requiredSymbols where sym.depth <= 2 {
+        var affected: [String] = []
+        for link in result.links where link.targetId == sym.id {
+            if required[link.sourceId] != nil {
+                affected.append(link.sourceId)
+            }
+        }
+        if !affected.isEmpty {
+            blastRadius[sym.id] = affected.sorted()
+        }
+    }
+
+    let reqCount = requiredSymbols.count
+    let totalCount = result.nodes.count
+    let reqFiles = requiredFiles.count
+    let totalFiles = allFiles.count
+    let pct = totalCount > 0 ? Int(Double(reqCount) / Double(totalCount) * 100) : 0
+
+    return FocusAnalysis(
+        rootId: rootId,
+        requiredSymbols: requiredSymbols,
+        requiredFiles: requiredFiles,
+        requiredFrameworks: [],
+        redundantSymbols: redundant,
+        unusedFrameworks: [],
+        blastRadius: blastRadius,
+        efficiency: FocusEfficiency(
+            requiredSymbolCount: reqCount,
+            totalSymbolCount: totalCount,
+            requiredFileCount: reqFiles,
+            totalFileCount: totalFiles,
+            requiredFrameworkCount: 0,
+            totalFrameworkCount: 0,
+            summary: "You need \(pct)% of symbols (\(reqCount)/\(totalCount)) and \(reqFiles)/\(totalFiles) files to build \(rootId)."
+        )
+    )
+}
+
+func generateFullSummary(result: AnalysisResult) -> FullSummary {
+    var outgoing: [String: Set<String>] = [:]
+    var incoming: [String: Set<String>] = [:]
+
+    for link in result.links {
+        outgoing[link.sourceId, default: []].insert(link.targetId)
+        incoming[link.targetId, default: []].insert(link.sourceId)
+    }
+
+    let allIds = Set(result.nodes.map(\.id))
+    let topLevelFlavors: Set<String> = ["struct", "class", "enum", "actor", "protocol"]
+
+    var symbols: [SymbolSummary] = []
+    var deadCode: [DeadCodeEntry] = []
+    var isolatedTypes = 0
+    var writeOnlyCount = 0
+    var initOnlyCount = 0
+
+    for node in result.nodes {
+        let inRefs = incoming[node.id] ?? []
+        let outRefs = outgoing[node.id] ?? []
+        let refCount = inRefs.count
+
+        let isVisible = node.isInteresting || topLevelFlavors.contains(node.flavor.rawValue) || node.flavor == .function || node.flavor == .initializer
+
+        symbols.append(SymbolSummary(
+            id: node.id,
+            name: node.name,
+            flavor: node.flavor.rawValue,
+            subKind: node.subKind?.rawValue,
+            isInteresting: node.isInteresting,
+            isVisibleInGraph: isVisible,
+            parent: node.parent,
+            sourceFile: node.sourceFile,
+            line: node.location.line,
+            referenceCount: refCount,
+            referencedBy: inRefs.sorted(),
+            references: outRefs.sorted()
+        ))
+
+        if topLevelFlavors.contains(node.flavor.rawValue) && node.parent == nil {
+            let hasIncoming = !inRefs.isEmpty
+            let hasOutgoing = !outRefs.isEmpty
+            if !hasIncoming && !hasOutgoing {
+                isolatedTypes += 1
+                deadCode.append(DeadCodeEntry(
+                    id: node.id,
+                    name: node.name,
+                    flavor: node.flavor.rawValue,
+                    sourceFile: node.sourceFile,
+                    line: node.location.line,
+                    reason: "Isolated type: no incoming or outgoing dependencies",
+                    suggestion: "This type is never referenced by other code. Consider removing it or verifying it's used via runtime/reflection."
+                ))
+            }
+        }
+
+        if node.flavor == .variable && node.subKind?.rawValue == "stored" && !node.isInteresting {
+            if refCount == 0 {
+                deadCode.append(DeadCodeEntry(
+                    id: node.id,
+                    name: node.name,
+                    flavor: node.flavor.rawValue,
+                    sourceFile: node.sourceFile,
+                    line: node.location.line,
+                    reason: "Stored property never read or written with logic",
+                    suggestion: "This property is never referenced outside its declaration. It can be safely removed to reduce memory footprint."
+                ))
+            }
+
+            let onlyFromInit = inRefs.allSatisfy { ref in
+                result.nodes.first { $0.id == ref }?.flavor == .initializer
+            }
+            if refCount > 0 && onlyFromInit && !inRefs.isEmpty {
+                initOnlyCount += 1
+                deadCode.append(DeadCodeEntry(
+                    id: node.id,
+                    name: node.name,
+                    flavor: node.flavor.rawValue,
+                    sourceFile: node.sourceFile,
+                    line: node.location.line,
+                    reason: "Property only used during init",
+                    suggestion: "This variable is only accessed in initializers and never read again. Consider using a local constant instead."
+                ))
+            }
+        }
+    }
+
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime]
+
+    let deadCount = deadCode.count
+    let total = result.nodes.count
+    let pct = total > 0 ? Double(deadCount) / Double(total) * 100 : 0
+
+    return FullSummary(
+        version: "1.0",
+        generatedAt: formatter.string(from: Date()),
+        symbols: symbols,
+        deadCode: deadCode,
+        pruningStats: PruningStats(
+            totalSymbols: total,
+            deadSymbols: deadCount,
+            isolatedTypes: isolatedTypes,
+            writeOnlyProperties: writeOnlyCount,
+            initOnlyProperties: initOnlyCount,
+            estimatedSavings: String(format: "%.1f%% of symbols are candidates for removal", pct)
+        )
+    )
 }
 
 func collapseModules(result: AnalysisResult, targets: [ParsedTarget]) -> AnalysisResult {
@@ -377,6 +615,7 @@ func collapseModules(result: AnalysisResult, targets: [ParsedTarget]) -> Analysi
             isStatic: false,
             isGlobal: false,
             isNested: false,
+            isInteresting: true,
             access: .public,
             parent: nil,
             parentFile: nil,
@@ -387,7 +626,7 @@ func collapseModules(result: AnalysisResult, targets: [ParsedTarget]) -> Analysi
         )
     }
 
-    return AnalysisResult(
+    return AnalysisResult(projectRoot: nil, 
         nodes: retainedNodes + moduleAsNodes,
         links: retargetedLinks,
         resources: result.resources,
@@ -416,6 +655,7 @@ func extractSummary(from result: AnalysisResult) -> AnalysisResult {
             isStatic: node.isStatic,
             isGlobal: node.isGlobal,
             isNested: node.isNested,
+            isInteresting: node.isInteresting,
             access: node.access,
             parent: node.parent,
             parentFile: node.parentFile,
@@ -428,7 +668,7 @@ func extractSummary(from result: AnalysisResult) -> AnalysisResult {
 
     let summaryLinks = result.links.filter { summaryIds.contains($0.sourceId) && summaryIds.contains($0.targetId) }
 
-    return AnalysisResult(
+    return AnalysisResult(projectRoot: nil, 
         nodes: enrichedNodes,
         links: summaryLinks,
         resources: result.resources,
@@ -449,7 +689,7 @@ func extractMembers(of parentId: String, from result: AnalysisResult) -> Analysi
 
     let parentNode = result.nodes.filter { $0.id == parentId }
 
-    return AnalysisResult(
+    return AnalysisResult(projectRoot: nil, 
         nodes: parentNode + members,
         links: memberLinks,
         resources: [],

@@ -37,7 +37,11 @@ export type LinkType =
   | "cross_target_dependency"
   | "macro_expansion"
   | "extension_contribution"
-  | "nesting";
+  | "nesting"
+  | "environment_injection"
+  | "environment_provider"
+  | "holds_type"
+  | "enum_usage";
 
 export type LinkConfidence = "high" | "medium" | "low";
 
@@ -77,6 +81,7 @@ export interface PrismNode {
   isStatic: boolean;
   isGlobal: boolean;
   isNested: boolean;
+  isInteresting: boolean;
   access: AccessLevel;
   parent: string | null;
   parentFile: string | null;
@@ -138,6 +143,7 @@ export interface ModuleNode {
 }
 
 export interface AnalysisResult {
+  projectRoot: string | null;
   nodes: PrismNode[];
   links: PrismLink[];
   resources: ResourceNode[];

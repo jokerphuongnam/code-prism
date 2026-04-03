@@ -130,6 +130,10 @@ const LINK_COLORS: Record<LinkType, string> = {
   macro_expansion: "#FF7043",
   extension_contribution: "#42A5F5",
   nesting: "#B0BEC5",
+  environment_injection: "#80DEEA",
+  environment_provider: "#4DD0E1",
+  holds_type: "#B0BEC5",
+  enum_usage: "#FF8A65",
 };
 
 export function linkColor(type: LinkType): string {
@@ -157,6 +161,13 @@ export function linkDashArray(type: LinkType): number[] | null {
       return [6, 4];
     case "nesting":
       return null;
+    case "environment_injection":
+    case "environment_provider":
+      return [5, 5];
+    case "holds_type":
+      return [3, 6];
+    case "enum_usage":
+      return [4, 3];
     default:
       return null;
   }
@@ -178,6 +189,13 @@ export function linkWidth(type: LinkType): number {
       return 1.5;
     case "nesting":
       return 3;
+    case "environment_injection":
+    case "environment_provider":
+      return 1.5;
+    case "holds_type":
+      return 0.8;
+    case "enum_usage":
+      return 1;
     case "heuristic_link":
       return 1;
     default:

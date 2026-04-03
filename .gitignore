@@ -75,3 +75,6 @@ npm-debug.log*
 
 # ── Generated Context (rebuild via run.sh) ──────────────────────
 prism-context.json
+node_modules
+package-lock.json
+settings.json

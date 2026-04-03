@@ -27,7 +27,7 @@ final class SymbolCollector: SyntaxVisitor {
         let id = makeID(parent: parent, name: name)
         let global = containerStack.isEmpty && !insideExtension
         let nested = !containerStack.isEmpty && !insideExtension
-        symbols.append(SymbolInfo(id: id, name: name, flavor: .class, subKind: nil, isStatic: false, isGlobal: global, isNested: nested, parentFile: global ? fileName : nil, sourceFile: fileName, access: access, parent: parent, location: loc))
+        symbols.append(SymbolInfo(id: id, name: name, flavor: .class, subKind: nil, isStatic: false, isGlobal: global, isNested: nested, isInteresting: true, resolvedType: nil, parentFile: global ? fileName : nil, sourceFile: fileName, access: access, parent: parent, location: loc))
         containerStack.append(name)
         return .visitChildren
     }
@@ -44,7 +44,7 @@ final class SymbolCollector: SyntaxVisitor {
         let id = makeID(parent: parent, name: name)
         let global = containerStack.isEmpty && !insideExtension
         let nested = !containerStack.isEmpty && !insideExtension
-        symbols.append(SymbolInfo(id: id, name: name, flavor: .struct, subKind: nil, isStatic: false, isGlobal: global, isNested: nested, parentFile: global ? fileName : nil, sourceFile: fileName, access: access, parent: parent, location: loc))
+        symbols.append(SymbolInfo(id: id, name: name, flavor: .struct, subKind: nil, isStatic: false, isGlobal: global, isNested: nested, isInteresting: true, resolvedType: nil, parentFile: global ? fileName : nil, sourceFile: fileName, access: access, parent: parent, location: loc))
         containerStack.append(name)
         return .visitChildren
     }
@@ -61,7 +61,7 @@ final class SymbolCollector: SyntaxVisitor {
         let id = makeID(parent: parent, name: name)
         let global = containerStack.isEmpty && !insideExtension
         let nested = !containerStack.isEmpty && !insideExtension
-        symbols.append(SymbolInfo(id: id, name: name, flavor: .enum, subKind: nil, isStatic: false, isGlobal: global, isNested: nested, parentFile: global ? fileName : nil, sourceFile: fileName, access: access, parent: parent, location: loc))
+        symbols.append(SymbolInfo(id: id, name: name, flavor: .enum, subKind: nil, isStatic: false, isGlobal: global, isNested: nested, isInteresting: true, resolvedType: nil, parentFile: global ? fileName : nil, sourceFile: fileName, access: access, parent: parent, location: loc))
         containerStack.append(name)
         return .visitChildren
     }
@@ -78,7 +78,7 @@ final class SymbolCollector: SyntaxVisitor {
         let id = makeID(parent: parent, name: name)
         let global = containerStack.isEmpty && !insideExtension
         let nested = !containerStack.isEmpty && !insideExtension
-        symbols.append(SymbolInfo(id: id, name: name, flavor: .actor, subKind: nil, isStatic: false, isGlobal: global, isNested: nested, parentFile: global ? fileName : nil, sourceFile: fileName, access: access, parent: parent, location: loc))
+        symbols.append(SymbolInfo(id: id, name: name, flavor: .actor, subKind: nil, isStatic: false, isGlobal: global, isNested: nested, isInteresting: true, resolvedType: nil, parentFile: global ? fileName : nil, sourceFile: fileName, access: access, parent: parent, location: loc))
         containerStack.append(name)
         return .visitChildren
     }
@@ -95,7 +95,7 @@ final class SymbolCollector: SyntaxVisitor {
         let id = makeID(parent: parent, name: name)
         let global = containerStack.isEmpty && !insideExtension
         let nested = !containerStack.isEmpty && !insideExtension
-        symbols.append(SymbolInfo(id: id, name: name, flavor: .protocol, subKind: nil, isStatic: false, isGlobal: global, isNested: nested, parentFile: global ? fileName : nil, sourceFile: fileName, access: access, parent: parent, location: loc))
+        symbols.append(SymbolInfo(id: id, name: name, flavor: .protocol, subKind: nil, isStatic: false, isGlobal: global, isNested: nested, isInteresting: true, resolvedType: nil, parentFile: global ? fileName : nil, sourceFile: fileName, access: access, parent: parent, location: loc))
         containerStack.append(name)
         return .visitChildren
     }
@@ -122,7 +122,7 @@ final class SymbolCollector: SyntaxVisitor {
         let id = makeID(parent: parent, name: name)
         let isStatic = hasStaticModifier(node.modifiers)
         let global = containerStack.isEmpty && !insideExtension
-        symbols.append(SymbolInfo(id: id, name: name, flavor: .function, subKind: nil, isStatic: isStatic, isGlobal: global, isNested: false, parentFile: global ? fileName : nil, sourceFile: fileName, access: access, parent: parent, location: loc))
+        symbols.append(SymbolInfo(id: id, name: name, flavor: .function, subKind: nil, isStatic: isStatic, isGlobal: global, isNested: false, isInteresting: true, resolvedType: nil, parentFile: global ? fileName : nil, sourceFile: fileName, access: access, parent: parent, location: loc))
         return .visitChildren
     }
 
@@ -134,12 +134,22 @@ final class SymbolCollector: SyntaxVisitor {
         functionBodyDepth -= 1
     }
 
+    private static let interestingWrappers: Set<String> = [
+        "Published", "State", "Binding", "ObservedObject", "StateObject",
+        "EnvironmentObject", "Environment", "AppStorage", "SceneStorage",
+        "FetchRequest", "Query", "Namespace",
+    ]
+
     override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
         if insideFunctionBody { return .skipChildren }
         let access = accessLevel(from: node.modifiers)
         let parent = containerStack.last
         let isStatic = hasStaticModifier(node.modifiers)
         let global = containerStack.isEmpty && !insideExtension
+        let hasWrapper = node.attributes.contains { attr in
+            guard let a = attr.as(AttributeSyntax.self) else { return false }
+            return Self.interestingWrappers.contains(a.attributeName.trimmedDescription)
+        }
 
         for binding in node.bindings {
             guard let pattern = binding.pattern.as(IdentifierPatternSyntax.self) else { continue }
@@ -148,7 +158,9 @@ final class SymbolCollector: SyntaxVisitor {
             let loc = sourceLocation(of: binding)
 
             let subKind = resolveVarSubKind(binding)
-            symbols.append(SymbolInfo(id: id, name: name, flavor: .variable, subKind: subKind, isStatic: isStatic, isGlobal: global, isNested: false, parentFile: global ? fileName : nil, sourceFile: fileName, access: access, parent: parent, location: loc))
+            let interesting = subKind == .computed || subKind == .willSet || subKind == .didSet || hasWrapper || isStatic
+            let resolvedType = extractResolvedType(binding: binding, node: node)
+            symbols.append(SymbolInfo(id: id, name: name, flavor: .variable, subKind: subKind, isStatic: isStatic, isGlobal: global, isNested: false, isInteresting: interesting, resolvedType: resolvedType, parentFile: global ? fileName : nil, sourceFile: fileName, access: access, parent: parent, location: loc))
 
             collectObserverSymbols(binding: binding, varName: name, parent: parent, access: access, isStatic: isStatic, isGlobal: global)
         }
@@ -162,7 +174,7 @@ final class SymbolCollector: SyntaxVisitor {
         let parent = containerStack.last
         let id = makeID(parent: parent, name: "init")
         let global = containerStack.isEmpty && !insideExtension
-        symbols.append(SymbolInfo(id: id, name: "init", flavor: .initializer, subKind: nil, isStatic: false, isGlobal: global, isNested: false, parentFile: global ? fileName : nil, sourceFile: fileName, access: access, parent: parent, location: loc))
+        symbols.append(SymbolInfo(id: id, name: "init", flavor: .initializer, subKind: nil, isStatic: false, isGlobal: global, isNested: false, isInteresting: true, resolvedType: nil, parentFile: global ? fileName : nil, sourceFile: fileName, access: access, parent: parent, location: loc))
         return .visitChildren
     }
 
@@ -177,8 +189,26 @@ final class SymbolCollector: SyntaxVisitor {
             let name = "\(varName).\(kind)"
             let id = makeID(parent: parent, name: name)
             let loc = sourceLocation(of: accessor)
-            symbols.append(SymbolInfo(id: id, name: name, flavor: .variable, subKind: subKind, isStatic: isStatic, isGlobal: isGlobal, isNested: false, parentFile: isGlobal ? fileName : nil, sourceFile: fileName, access: access, parent: parent, location: loc))
+            symbols.append(SymbolInfo(id: id, name: name, flavor: .variable, subKind: subKind, isStatic: isStatic, isGlobal: isGlobal, isNested: false, isInteresting: true, resolvedType: nil, parentFile: isGlobal ? fileName : nil, sourceFile: fileName, access: access, parent: parent, location: loc))
         }
+    }
+
+    private func extractResolvedType(binding: PatternBindingSyntax, node: VariableDeclSyntax) -> String? {
+        if let typeAnnotation = binding.typeAnnotation {
+            let raw = typeAnnotation.type.trimmedDescription
+            let cleaned = raw.replacingOccurrences(of: "?", with: "").replacingOccurrences(of: "!", with: "")
+            if !cleaned.isEmpty && cleaned.first?.isUppercase == true { return cleaned }
+        }
+        if let initializer = binding.initializer {
+            let initExpr = initializer.value
+            if let funcCall = initExpr.as(FunctionCallExprSyntax.self) {
+                if let ident = funcCall.calledExpression.as(DeclReferenceExprSyntax.self) {
+                    let name = ident.baseName.text
+                    if name.first?.isUppercase == true { return name }
+                }
+            }
+        }
+        return nil
     }
 
     private func resolveVarSubKind(_ binding: PatternBindingSyntax) -> SymbolSubKind? {

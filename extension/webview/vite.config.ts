@@ -7,11 +7,13 @@ export default defineConfig({
   build: {
     outDir: path.resolve(__dirname, "../dist-webview"),
     emptyOutDir: true,
+    target: "esnext",
     rollupOptions: {
       output: {
         entryFileNames: "webview.js",
         assetFileNames: "webview.[ext]",
-        chunkFileNames: "webview-[name].js",
+        manualChunks: undefined,
+        inlineDynamicImports: true,
       },
     },
   },
