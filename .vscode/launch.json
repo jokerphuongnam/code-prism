@@ -11,13 +11,10 @@
       "outFiles": [
         "${workspaceFolder}/extension/out/**/*.js"
       ],
-      "preLaunchTask": "SwiftPrism: Watch Extension",
-      "env": {
-        "VSCODE_DEBUG_MODE": "true"
-      }
+      "preLaunchTask": "SwiftPrism: Build Extension Only"
     },
     {
-      "name": "Run SwiftPrism (Full Build)",
+      "name": "Run SwiftPrism (Watch Mode)",
       "type": "extensionHost",
       "request": "launch",
       "args": [
@@ -26,7 +23,7 @@
       "outFiles": [
         "${workspaceFolder}/extension/out/**/*.js"
       ],
-      "preLaunchTask": "SwiftPrism: Build Extension Only"
+      "preLaunchTask": "SwiftPrism: Watch Extension"
     },
     {
       "type": "swift",
@@ -37,26 +34,6 @@
       "target": "SwiftPrismAnalyzer",
       "configuration": "debug",
       "preLaunchTask": "SwiftPrism: Build Swift Core Only"
-    },
-    {
-      "type": "swift",
-      "request": "launch",
-      "args": [],
-      "cwd": "${workspaceFolder:swift-prism}/core",
-      "name": "Debug swift-prism-analyzer (core)",
-      "target": "swift-prism-analyzer",
-      "configuration": "debug",
-      "preLaunchTask": "swift: Build Debug swift-prism-analyzer (core)"
-    },
-    {
-      "type": "swift",
-      "request": "launch",
-      "args": [],
-      "cwd": "${workspaceFolder:swift-prism}/core",
-      "name": "Release swift-prism-analyzer (core)",
-      "target": "swift-prism-analyzer",
-      "configuration": "release",
-      "preLaunchTask": "swift: Build Release swift-prism-analyzer (core)"
     }
   ]
 }

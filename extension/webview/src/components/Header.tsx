@@ -52,22 +52,22 @@ export function Header({
     <>
       <div style={s.actionBar}>
         <IconButton
-          icon={loading ? "\u23F3" : "\u25B6"}
-          label={loading ? "Analyzing\u2026" : "Analyze Project"}
+          icon={loading ? "⏳" : "▶"}
+          label={loading ? "Analyzing…" : "Analyze Project"}
           onClick={onAnalyze}
           disabled={loading}
         />
         <IconButton
-          icon="{}"
+          icon="📋"
           label="View Raw JSON"
           onClick={onViewRawJson}
           disabled={jsonLoading || loading}
         />
         <div style={s.divider} />
-        <IconButton icon="\u{1F4CA}" label="3D Graph" onClick={() => onTabChange("graph")} active={activeTab === "graph"} />
-        <IconButton icon="\u{1F4DD}" label="JSON Preview" onClick={() => onTabChange("json")} active={activeTab === "json"} />
+        <IconButton icon="🧊" label="3D Graph" onClick={() => onTabChange("graph")} active={activeTab === "graph"} />
+        <IconButton icon="📝" label="JSON Preview" onClick={() => onTabChange("json")} active={activeTab === "json"} />
         {hasResources && (
-          <IconButton icon="\u{1F4D6}" label="Guide" onClick={() => onTabChange("guide")} active={activeTab === "guide"} />
+          <IconButton icon="📖" label="Guide" onClick={() => onTabChange("guide")} active={activeTab === "guide"} />
         )}
       </div>
 

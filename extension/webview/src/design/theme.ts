@@ -10,6 +10,7 @@ const FLAVOR_COLORS: Record<SymbolFlavor, string> = {
   variable: "#66BB6A",
   initializer: "#AB47BC",
   macro: "#FF7043",
+  entry_point: "#FFD700",
 };
 
 const SUBKIND_COLORS: Partial<Record<SymbolSubKind, string>> = {
@@ -97,6 +98,8 @@ export function nodeSize(flavor: SymbolFlavor, subKind: SymbolSubKind | null): n
       return 4;
     case "macro":
       return 7;
+    case "entry_point":
+      return 14;
   }
 }
 

@@ -35,6 +35,10 @@ struct Node: Encodable {
     let location: SourceLocation
     let targetName: String?
     let memberCount: Int?
+    let parents: [String]?
+    let implementers: [String]?
+    let superClass: String?
+    let extensions: [String]?
 }
 
 struct ResourceNode: Encodable {
@@ -103,6 +107,7 @@ enum SymbolFlavor: String, Encodable {
     case variable
     case initializer
     case macro
+    case entryPoint = "entry_point"
 }
 
 enum SymbolSubKind: String, Encodable {
