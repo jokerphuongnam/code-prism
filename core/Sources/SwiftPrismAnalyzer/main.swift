@@ -622,7 +622,7 @@ func collapseModules(result: AnalysisResult, targets: [ParsedTarget]) -> Analysi
             sourceFile: "",
             location: SourceLocation(file: "", line: 0, column: 0),
             targetName: m.name,
-            memberCount: m.symbolCount
+            memberCount: m.symbolCount, parents: nil, implementers: nil, superClass: nil, extensions: nil
         )
     }
 
@@ -662,7 +662,7 @@ func extractSummary(from result: AnalysisResult) -> AnalysisResult {
             sourceFile: node.sourceFile,
             location: node.location,
             targetName: node.targetName,
-            memberCount: memberCounts[node.id]
+            memberCount: memberCounts[node.id], parents: nil, implementers: nil, superClass: nil, extensions: nil
         )
     }
 

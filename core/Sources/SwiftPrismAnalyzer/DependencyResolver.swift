@@ -210,6 +210,24 @@ struct DependencyResolver {
             }
         }
 
+        var implementersMap: [String: [String]] = [:]
+        var superClassMap: [String: String] = [:]
+        var extensionFilesMap: [String: Set<String>] = [:]
+
+        for link in links {
+            if link.type == .conformance {
+                implementersMap[link.targetId, default: []].append(link.sourceId)
+            }
+            if link.type == .inheritance {
+                superClassMap[link.sourceId] = link.targetId
+            }
+            if link.type == .extensionContribution {
+                let typeName = link.targetId
+                let fileName = String(link.sourceId.dropFirst("file:".count))
+                extensionFilesMap[typeName, default: []].insert(fileName)
+            }
+        }
+
         let nodes = symbols
             .filter { sym in
                 if publicOnlyTargets.contains(sym.targetName ?? "") {
@@ -217,8 +235,29 @@ struct DependencyResolver {
                 }
                 return true
             }
-            .map {
-                Node(id: $0.id, name: $0.name, flavor: $0.flavor, subKind: $0.subKind, isStatic: $0.isStatic, isGlobal: $0.isGlobal, isNested: $0.isNested, isInteresting: $0.isInteresting, access: $0.access, parent: $0.parent, parentFile: $0.parentFile, sourceFile: $0.sourceFile, location: $0.location, targetName: $0.targetName, memberCount: nil)
+            .map { sym -> Node in
+                var parents: [String] = []
+                if let p = sym.parent { parents.append(p) }
+                parents.append("file:\(sym.sourceFile)")
+
+                let extFiles = extensionFilesMap[sym.id]
+                if let extFiles {
+                    for f in extFiles { parents.append("file:\(f)") }
+                }
+
+                let isType = [SymbolFlavor.struct, .class, .enum, .actor, .protocol].contains(sym.flavor)
+
+                return Node(
+                    id: sym.id, name: sym.name, flavor: sym.flavor, subKind: sym.subKind,
+                    isStatic: sym.isStatic, isGlobal: sym.isGlobal, isNested: sym.isNested,
+                    isInteresting: sym.isInteresting, access: sym.access,
+                    parent: sym.parent, parentFile: sym.parentFile, sourceFile: sym.sourceFile,
+                    location: sym.location, targetName: sym.targetName, memberCount: nil,
+                    parents: parents.isEmpty ? nil : parents,
+                    implementers: isType ? implementersMap[sym.id] : nil,
+                    superClass: superClassMap[sym.id],
+                    extensions: isType ? extFiles.map { Array($0).sorted() } : nil
+                )
             }
 
         let targetInfos = targets.map {
@@ -259,7 +298,62 @@ struct DependencyResolver {
             }
         }
 
-        return AnalysisResult(projectRoot: nil, nodes: nodes, links: links, resources: resources, targets: targetInfos, macros: macroNodes, moduleNodes: nil)
+        var allNodes = nodes
+
+        var mainAttrTypes: Set<String> = []
+        for (_, tree) in fileSources {
+            let checker = MainAttrChecker()
+            checker.walk(tree)
+            mainAttrTypes.formUnion(checker.mainTypes)
+        }
+
+        var entryPointsByTarget: [String: [String]] = [:]
+        let targetNames = Set(targets.map(\.name))
+        let defaultTarget = targets.first?.name ?? "Default"
+
+        for sym in symbols {
+            let symTarget = sym.targetName ?? defaultTarget
+
+            if mainAttrTypes.contains(sym.id) && (sym.flavor == .struct || sym.flavor == .class) {
+                entryPointsByTarget[symTarget, default: []].append(sym.id)
+                for child in symbols where child.parent == sym.id && (child.flavor == .initializer || child.name == "body") {
+                    entryPointsByTarget[symTarget, default: []].append(child.id)
+                }
+            }
+
+            if sym.name == "main" && sym.flavor == .function && sym.parent == nil {
+                entryPointsByTarget[symTarget, default: []].append(sym.id)
+            }
+        }
+
+        if entryPointsByTarget.isEmpty {
+            for sym in symbols where sym.name == "run" && sym.flavor == .function && sym.parent == nil {
+                let t = sym.targetName ?? defaultTarget
+                entryPointsByTarget[t, default: []].append(sym.id)
+            }
+        }
+
+        for (targetName, entryPoints) in entryPointsByTarget {
+            let mainId = "MAIN::\(targetName)"
+            let mainNode = Node(
+                id: mainId, name: "Main (\(targetName))", flavor: .entryPoint, subKind: nil,
+                isStatic: false, isGlobal: true, isNested: false, isInteresting: true,
+                access: .public, parent: nil, parentFile: nil, sourceFile: "",
+                location: SourceLocation(file: "", line: 0, column: 0),
+                targetName: targetName, memberCount: nil,
+                parents: ["target:\(targetName)"], implementers: nil, superClass: nil, extensions: nil
+            )
+            allNodes.append(mainNode)
+
+            for ep in entryPoints {
+                let key = "\(mainId)->\(ep):call"
+                if seen.insert(key).inserted {
+                    links.append(Link(sourceId: mainId, targetId: ep, type: .call, confidence: .high, references: nil))
+                }
+            }
+        }
+
+        return AnalysisResult(projectRoot: nil, nodes: allNodes, links: links, resources: resources, targets: targetInfos, macros: macroNodes, moduleNodes: nil)
     }
 
     private func findGeneratedSymbols(macroName: String, links: [Link]) -> [String] {
@@ -400,5 +494,29 @@ private final class BodyFinder: SyntaxVisitor {
     private func makeID(name: String) -> String {
         if let parent = containerStack.last { return "\(parent).\(name)" }
         return name
+    }
+}
+
+private final class MainAttrChecker: SyntaxVisitor {
+    var mainTypes: Set<String> = []
+
+    init() { super.init(viewMode: .sourceAccurate) }
+
+    override func visit(_ node: StructDeclSyntax) -> SyntaxVisitorContinueKind {
+        if hasMainAttr(node.attributes) { mainTypes.insert(node.name.text) }
+        return .skipChildren
+    }
+
+    override func visit(_ node: ClassDeclSyntax) -> SyntaxVisitorContinueKind {
+        if hasMainAttr(node.attributes) { mainTypes.insert(node.name.text) }
+        return .skipChildren
+    }
+
+    private func hasMainAttr(_ attrs: AttributeListSyntax) -> Bool {
+        attrs.contains { attr in
+            guard let a = attr.as(AttributeSyntax.self) else { return false }
+            let name = a.attributeName.trimmedDescription
+            return name == "main" || name == "UIApplicationMain" || name == "NSApplicationMain"
+        }
     }
 }

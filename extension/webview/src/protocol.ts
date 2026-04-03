@@ -7,7 +7,8 @@ export type SymbolFlavor =
   | "function"
   | "variable"
   | "initializer"
-  | "macro";
+  | "macro"
+  | "entry_point";
 
 export type SymbolSubKind =
   | "willSet"

@@ -3,6 +3,9 @@ import * as path from "path";
 import * as fs from "fs";
 import type { AnalysisResult, ProgressInfo } from "./protocol";
 
+export const LOGIC_VERSION = "2.0-target-centric";
+console.log(`[SwiftPrism] analyzerBridge loaded — Logic Version: ${LOGIC_VERSION}`);
+
 export class AnalyzerError extends Error {
   public readonly stderr: string;
   constructor(message: string, stderr: string = "") {
