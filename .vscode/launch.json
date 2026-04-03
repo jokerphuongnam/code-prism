@@ -37,6 +37,26 @@
       "target": "SwiftPrismAnalyzer",
       "configuration": "debug",
       "preLaunchTask": "SwiftPrism: Build Swift Core Only"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:swift-prism}/core",
+      "name": "Debug swift-prism-analyzer (core)",
+      "target": "swift-prism-analyzer",
+      "configuration": "debug",
+      "preLaunchTask": "swift: Build Debug swift-prism-analyzer (core)"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:swift-prism}/core",
+      "name": "Release swift-prism-analyzer (core)",
+      "target": "swift-prism-analyzer",
+      "configuration": "release",
+      "preLaunchTask": "swift: Build Release swift-prism-analyzer (core)"
     }
   ]
 }

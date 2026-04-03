@@ -127,6 +127,87 @@ struct DependencyResolver {
                     links.append(Link(sourceId: ref.declId, targetId: ref.inheritedName, type: ref.linkType, confidence: nil, references: nil))
                 }
             }
+
+            let envCollector = EnvironmentCollector(filePath: filePath)
+            envCollector.walk(tree)
+            for ref in envCollector.refs {
+                switch ref.kind {
+                case .environmentObject, .environment:
+                    if let targetId = nameToID[ref.typeName] ?? typeNames.first(where: { $0 == ref.typeName }) {
+                        let key = "\(ref.consumerId)->\(targetId):environment_injection"
+                        if seen.insert(key).inserted {
+                            links.append(Link(sourceId: ref.consumerId, targetId: targetId, type: .environmentInjection, confidence: .medium, references: nil))
+                        }
+                    }
+                    if let keyPath = ref.keyPath {
+                        let envKeyName = keyPath.replacingOccurrences(of: "\\.", with: "").replacingOccurrences(of: "\\", with: "")
+                        for sym in symbols where sym.name == envKeyName && sym.parent == "EnvironmentValues" {
+                            let key = "\(ref.consumerId)->\(sym.id):environment_injection"
+                            if seen.insert(key).inserted {
+                                links.append(Link(sourceId: ref.consumerId, targetId: sym.id, type: .environmentInjection, confidence: .high, references: nil))
+                            }
+                        }
+                    }
+                case .providesObject:
+                    if let targetId = nameToID[ref.typeName] ?? typeNames.first(where: { $0 == ref.typeName }) {
+                        let key = "\(ref.consumerId)->\(targetId):environment_provider"
+                        if seen.insert(key).inserted {
+                            links.append(Link(sourceId: ref.consumerId, targetId: targetId, type: .environmentProvider, confidence: .medium, references: nil))
+                        }
+                    }
+                case .providesValue:
+                    if let keyPath = ref.keyPath {
+                        let envKeyName = keyPath.replacingOccurrences(of: "\\.", with: "").replacingOccurrences(of: "\\", with: "")
+                        for sym in symbols where sym.name == envKeyName && sym.parent == "EnvironmentValues" {
+                            let key = "\(ref.consumerId)->\(sym.id):environment_provider"
+                            if seen.insert(key).inserted {
+                                links.append(Link(sourceId: ref.consumerId, targetId: sym.id, type: .environmentProvider, confidence: .high, references: nil))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for sym in symbols {
+            guard sym.flavor == .variable, let parent = sym.parent, let typeName = sym.resolvedType else { continue }
+            guard let targetId = nameToID[typeName] ?? typeNames.first(where: { $0 == typeName }) else { continue }
+            let key = "\(parent)->\(targetId):holds_type:\(sym.name)"
+            if seen.insert(key).inserted {
+                links.append(Link(sourceId: parent, targetId: targetId, type: .holdsType, confidence: .high, references: nil))
+            }
+        }
+
+        var enumCaseToType: [String: String] = [:]
+        for sym in symbols where sym.flavor == .variable && sym.parent != nil {
+            let parentSym = symbols.first { $0.id == sym.parent && $0.flavor == .enum }
+            if let parentSym {
+                enumCaseToType[sym.name] = parentSym.id
+            }
+        }
+
+        let staticMethodReturnTypes: [String: String] = [:]
+
+        for (filePath, tree) in fileSources {
+            let enumCollector = EnumUsageCollector(filePath: filePath)
+            enumCollector.walk(tree)
+
+            for usage in enumCollector.usages {
+                if let enumId = enumCaseToType[usage.memberName] {
+                    let key = "\(usage.callSiteId)->\(enumId):enum_usage:\(usage.memberName)"
+                    if seen.insert(key).inserted {
+                        links.append(Link(sourceId: usage.callSiteId, targetId: enumId, type: .enumUsage, confidence: .medium, references: nil))
+                    }
+                }
+
+                if let returnType = staticMethodReturnTypes[usage.memberName],
+                   let targetId = nameToID[returnType] ?? typeNames.first(where: { $0 == returnType }) {
+                    let key = "\(usage.callSiteId)->\(targetId):call:\(usage.memberName)"
+                    if seen.insert(key).inserted {
+                        links.append(Link(sourceId: usage.callSiteId, targetId: targetId, type: .call, confidence: .medium, references: nil))
+                    }
+                }
+            }
         }
 
         let nodes = symbols
@@ -137,7 +218,7 @@ struct DependencyResolver {
                 return true
             }
             .map {
-                Node(id: $0.id, name: $0.name, flavor: $0.flavor, subKind: $0.subKind, isStatic: $0.isStatic, isGlobal: $0.isGlobal, isNested: $0.isNested, access: $0.access, parent: $0.parent, parentFile: $0.parentFile, sourceFile: $0.sourceFile, location: $0.location, targetName: $0.targetName, memberCount: nil)
+                Node(id: $0.id, name: $0.name, flavor: $0.flavor, subKind: $0.subKind, isStatic: $0.isStatic, isGlobal: $0.isGlobal, isNested: $0.isNested, isInteresting: $0.isInteresting, access: $0.access, parent: $0.parent, parentFile: $0.parentFile, sourceFile: $0.sourceFile, location: $0.location, targetName: $0.targetName, memberCount: nil)
             }
 
         let targetInfos = targets.map {
@@ -178,7 +259,7 @@ struct DependencyResolver {
             }
         }
 
-        return AnalysisResult(nodes: nodes, links: links, resources: resources, targets: targetInfos, macros: macroNodes, moduleNodes: nil)
+        return AnalysisResult(projectRoot: nil, nodes: nodes, links: links, resources: resources, targets: targetInfos, macros: macroNodes, moduleNodes: nil)
     }
 
     private func findGeneratedSymbols(macroName: String, links: [Link]) -> [String] {

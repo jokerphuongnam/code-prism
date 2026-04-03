@@ -1,6 +1,7 @@
 import Foundation
 
 struct AnalysisResult: Encodable {
+    let projectRoot: String?
     let nodes: [Node]
     let links: [Link]
     let resources: [ResourceNode]
@@ -26,6 +27,7 @@ struct Node: Encodable {
     let isStatic: Bool
     let isGlobal: Bool
     let isNested: Bool
+    let isInteresting: Bool
     let access: AccessLevel
     let parent: String?
     let parentFile: String?
@@ -134,6 +136,10 @@ enum LinkType: String, Encodable {
     case macroExpansion = "macro_expansion"
     case extensionContribution = "extension_contribution"
     case nesting
+    case environmentInjection = "environment_injection"
+    case environmentProvider = "environment_provider"
+    case holdsType = "holds_type"
+    case enumUsage = "enum_usage"
 }
 
 enum LinkConfidence: String, Encodable {
@@ -191,6 +197,8 @@ struct SymbolInfo {
     let isStatic: Bool
     let isGlobal: Bool
     let isNested: Bool
+    let isInteresting: Bool
+    let resolvedType: String?
     let parentFile: String?
     let sourceFile: String
     let access: AccessLevel
@@ -233,6 +241,78 @@ struct ParsedTarget {
     let path: String
     let sourcePaths: [String]
     let dependencies: [String]
+}
+
+struct FullSummary: Encodable {
+    let version: String
+    let generatedAt: String
+    let symbols: [SymbolSummary]
+    let deadCode: [DeadCodeEntry]
+    let pruningStats: PruningStats
+}
+
+struct SymbolSummary: Encodable {
+    let id: String
+    let name: String
+    let flavor: String
+    let subKind: String?
+    let isInteresting: Bool
+    let isVisibleInGraph: Bool
+    let parent: String?
+    let sourceFile: String
+    let line: Int
+    let referenceCount: Int
+    let referencedBy: [String]
+    let references: [String]
+}
+
+struct DeadCodeEntry: Encodable {
+    let id: String
+    let name: String
+    let flavor: String
+    let sourceFile: String
+    let line: Int
+    let reason: String
+    let suggestion: String
+}
+
+struct PruningStats: Encodable {
+    let totalSymbols: Int
+    let deadSymbols: Int
+    let isolatedTypes: Int
+    let writeOnlyProperties: Int
+    let initOnlyProperties: Int
+    let estimatedSavings: String
+}
+
+struct FocusAnalysis: Encodable {
+    let rootId: String
+    let requiredSymbols: [FocusSymbol]
+    let requiredFiles: [String]
+    let requiredFrameworks: [String]
+    let redundantSymbols: [String]
+    let unusedFrameworks: [String]
+    let blastRadius: [String: [String]]
+    let efficiency: FocusEfficiency
+}
+
+struct FocusSymbol: Encodable {
+    let id: String
+    let name: String
+    let flavor: String
+    let depth: Int
+    let sourceFile: String
+    let isStub: Bool
+}
+
+struct FocusEfficiency: Encodable {
+    let requiredSymbolCount: Int
+    let totalSymbolCount: Int
+    let requiredFileCount: Int
+    let totalFileCount: Int
+    let requiredFrameworkCount: Int
+    let totalFrameworkCount: Int
+    let summary: String
 }
 
 struct FlatMapEntry: Encodable {

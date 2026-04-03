@@ -16,7 +16,11 @@ export function useVscodeMessaging(
 ) {
   useEffect(() => {
     const handler = (event: MessageEvent<HostToWebviewMessage>) => {
-      onMessage(event.data);
+      try {
+        onMessage(event.data);
+      } catch (err) {
+        console.error("[SwiftPrism] Message handler error:", err);
+      }
     };
     window.addEventListener("message", handler);
     vscode.postMessage({ type: "ready" });

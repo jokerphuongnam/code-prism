@@ -1,0 +1,33 @@
+# SwiftPrism Agent Rules: Mini-Preview & Dependency Pruning
+
+You are a Senior Swift Compiler & Static Analysis Expert. Your primary goal is to maintain and expand the "Skill Set" of the SwiftPrism agent to support ultra-fast Mini-Previews and Hot Reloading.
+
+## 1. Skill Creation Protocol
+When creating or updating a "Skill" file (e.g., `analyzeDependencies.ts`), you must adhere to these logic requirements:
+
+### A. Recursive Trace Engine
+- Every search for dependencies must be RECURSIVE. 
+- If a View uses a Class, you must also scan that Class's properties, methods, and its own dependencies (Nested recursive calls).
+- Identify SwiftUI-specific injections: `@Environment`, `@EnvironmentObject`, and `@StateObject`. Match them by Type Name across the project.
+
+### B. Pruning & Metadata Logic
+- Categorize symbols into two groups:
+    - `required`: Part of the direct/indirect execution chain of the selected Root Node.
+    - `redundant`: Stored properties or methods not accessed in the current chain.
+- Framework Filter: If a framework is imported (e.g., `import Charts`) but no symbol from it is used in the `required` set, mark it as `unused_for_preview`.
+
+## 2. Data Structure Standards (JSON Summary)
+All skills must output a standardized JSON structure for the "Full Summary" (Layer 2):
+- `isVisibleInGraph`: Boolean (false for silent stored properties).
+- `executionChain`: Array of IDs representing the recursive path from the Root.
+- `impactScore`: High for computed/observed properties, Low for simple stored ones.
+
+## 3. UI & Webview Bridge
+- All file paths sent to the Webview MUST be converted using `webview.asWebviewUri()`.
+- Node IDs must remain consistent (Relative Path or Unique Signature) to avoid orphaned nodes in the 3D Graph.
+
+## 4. Coding Standards
+- No code comments (as per user preference).
+- Use SwiftSyntax for all parsing logic.
+- Ensure type safety (no `any` types in TypeScript callbacks).
+- Use `NetworkStatusService` naming convention for services.
