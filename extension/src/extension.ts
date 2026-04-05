@@ -60,7 +60,15 @@ export function activate(context: vscode.ExtensionContext) {
 
   const viewProvider = new ExplorerViewProvider(context.extensionUri);
   const cache = new CacheManager(context.globalStorageUri);
-  cache.pruneStale();
+
+  // v4.0 flat-graph schema: purge all prior caches on every activation
+  const cleared = cache.clearAll();
+  if (cleared > 0) {
+    outputChannel.appendLine(`[v4.0] Cleared ${cleared} cached file(s) from globalStorageUri`);
+  }
+  context.workspaceState.keys().forEach((key) => context.workspaceState.update(key, undefined));
+  context.globalState.keys().forEach((key) => context.globalState.update(key, undefined));
+  console.log("CORE: Hierarchical Analyzer Activated — v4.0 flat-graph");
 
   const workspaceRoot = getWorkspaceRoot();
   if (workspaceRoot) {

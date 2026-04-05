@@ -252,7 +252,7 @@ Only read files listed in the output.
 | Shape | Condition | Example |
 |---|---|---|
 | Sphere | Instance members | `func doWork()` |
-| Box | `isStatic: true` | `static func shared()` |
+| Box | Static members | `static func shared()` |
 | Diamond | Computed property | `var count: Int { get }` |
 | Mini-sphere | `willSet`/`didSet` observer | `didSet { refresh() }` |
 | Large Box | `.xcassets` catalog | `Assets.xcassets` |

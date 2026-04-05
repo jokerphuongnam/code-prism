@@ -33,35 +33,52 @@ swift-prism-analyzer --workspace /path/to/project --context --output prism-conte
 
 Generates a `PrismContext` with:
 
-- **`files[]`**: Per-file list of public/internal signatures (no body code)
+- **`targets[]`**: Hierarchical per-target grouping of objects, functions, and resources
 - **`assetMap[]`**: Every Image/Color asset mapped to its usage points
 - **`dependencyIndex{}`**: Bidirectional adjacency list for the entire project
+
+The output uses a **hierarchical transformation layer** that groups all nodes under their owning target (see `UNIVERSAL_SCAN_LOGIC.md` section 7 for the v3.1 architecture rules). The Swift binary's intermediate output is transformed via scope-stack walk into the hierarchical schema before being written to `prism-context.json` in `context.globalStorageUri/cache/`.
 
 ### prism-context.json Schema
 
 ```json
 {
-  "version": "1.0",
+  "schemaVersion": "4.0-flat-graph",
   "generatedAt": "2026-04-01T12:00:00Z",
-  "files": [
+  "projectRoot": "/path/to/project",
+  "targets": [
     {
-      "path": "Sources/HomeViewModel.swift",
-      "signatures": [
-        {
-          "id": "HomeViewModel",
-          "signature": "internal class HomeViewModel: ObservableObject",
-          "line": 5,
-          "dependencies": ["HomeService.fetchData", "UserDefaults.standard"],
-          "resources": ["asset:Assets/home_banner"]
-        },
-        {
-          "id": "HomeViewModel.loadData",
-          "signature": "internal func loadData() -> Void",
-          "line": 12,
-          "dependencies": ["HomeService.fetchData"],
-          "resources": []
-        }
-      ]
+      "name": "MyApp",
+      "type": "executable",
+      "path": "Sources/MyApp",
+      "dependencies": ["NetworkKit"],
+      "isExternal": false,
+      "entryPoint": null,
+      "resources": []
+    }
+  ],
+  "nodes": [
+    {
+      "id": "MyApp::HomeViewModel",
+      "name": "HomeViewModel",
+      "flavor": "class",
+      "location": { "line": 5, "col": 1, "absPath": "/path/HomeViewModel.swift" },
+      "parents": ["HomeViewModel.swift"],
+      "calls": [],
+      "locations": [{ "absPath": "/path/HomeViewModel.swift", "line": 5, "col": 1, "type": "primary" }],
+      "sourceFiles": ["HomeViewModel.swift"],
+      "extends": null,
+      "implements": ["SwiftUI::ObservableObject"],
+      "inits": ["MyApp::HomeViewModel::init()"],
+      "deinits": []
+    },
+    {
+      "id": "MyApp::HomeViewModel::loadData(id:)",
+      "name": "loadData(id:)",
+      "flavor": "function",
+      "location": { "line": 12, "col": 3, "absPath": "/path/HomeViewModel.swift" },
+      "parents": ["MyApp::HomeViewModel"],
+      "calls": [{ "target": "NetworkKit::HomeService::fetchData()", "location": {} }]
     }
   ],
   "assetMap": [
@@ -69,12 +86,12 @@ Generates a `PrismContext` with:
       "assetId": "asset:Assets/home_banner",
       "assetName": "home_banner",
       "assetType": "image_set",
-      "usedBy": ["HomeViewModel.loadData", "HomeView.body"]
+      "usedBy": ["MyApp::HomeViewModel::loadData(id:)", "MyApp::HomeView::body"]
     }
   ],
   "dependencyIndex": {
-    "HomeViewModel": ["HomeService", "UserDefaults", "HomeView"],
-    "HomeService": ["NetworkClient", "HomeViewModel"]
+    "MyApp::HomeViewModel": ["NetworkKit::HomeService", "MyApp::HomeView"],
+    "NetworkKit::HomeService": ["NetworkKit::NetworkClient"]
   }
 }
 ```
@@ -116,9 +133,10 @@ In the 3D graph, clicking any node reveals a panel with a **"Copy Context for AI
 
 ### 4. Automatic Persistence
 
-- **On every analysis**: The extension writes `prism-context.json` to the workspace root
+- **On every analysis**: The extension writes `prism-context.json` to `context.globalStorageUri/cache/` (VS Code global storage), **never to the project root**
 - **`run.sh`**: Automatically regenerates the context file after every build
-- **No re-scan needed**: AI agents can read `prism-context.json` directly from disk
+- **Cache cleanup**: Legacy root-level `prism-context.json` files are auto-deleted on extension activation via `cache.cleanupWorkspaceArtifacts()`
+- **No re-scan needed**: AI agents can query via `--find-dependents-of` for cached data
 
 ## Data Pruning Strategy
 
@@ -185,11 +203,11 @@ files_to_read = deps["files"]
 
 ## Persistence & Caching
 
-| Trigger | Action |
-|---|---|
-| `./run.sh` | Regenerates `prism-context.json` |
-| "Analyze Project" in VS Code | Regenerates `prism-context.json` |
-| AI agent CLI query | Reads cached file, no re-scan |
-| File save (future) | Incremental update via file watcher |
+| Trigger | Action | Location |
+|---|---|---|
+| `./run.sh` | Regenerates `prism-context.json` | `context.globalStorageUri/cache/` |
+| "Analyze Project" in VS Code | Regenerates `prism-context.json` | `context.globalStorageUri/cache/` |
+| Extension activation | Clears stale caches + deletes legacy root files | Both |
+| AI agent CLI query | Reads cached file, no re-scan | `context.globalStorageUri/cache/` |
 
-The context file is deterministic — same source code always produces the same output. It can be committed to version control for CI/CD agents.
+The context file is deterministic — same source code always produces the same output. It is stored in VS Code's global storage directory, NOT the project root. Legacy `prism-context.json` files in the project root are auto-deleted on activation.

@@ -49,28 +49,49 @@ func runDirectScan(_ mode: RunMode) throws {
 
     emitProgress(phase: "scanning", processed: 0, total: 0)
 
-    let swiftFiles = discoverSwiftFiles(in: resolvedPath)
+    let targetResolver = TargetResolver(workspaceRoot: resolvedPath)
+    let targets = targetResolver.resolve()
+
+    var swiftFiles = discoverSwiftFiles(in: resolvedPath)
+    if swiftFiles.isEmpty && !targets.isEmpty {
+        swiftFiles = targets.flatMap(\.sourcePaths)
+    }
     guard !swiftFiles.isEmpty else {
         throw PrismError.noSwiftFilesFound(resolvedPath)
     }
 
-    let (allSymbols, fileSources) = scanFiles(swiftFiles)
+    var (allSymbols, fileSources, fileImports) = scanFiles(swiftFiles, targets: targets, targetResolver: targetResolver)
+
+    for idx in allSymbols.indices {
+        if allSymbols[idx].targetName == nil {
+            allSymbols[idx].targetName = targetResolver.mapFileToTarget(allSymbols[idx].location.file, targets: targets)
+        }
+    }
+
+    let projectName = sanitizeTargetName(URL(fileURLWithPath: resolvedPath).lastPathComponent)
+    for idx in allSymbols.indices {
+        if allSymbols[idx].targetName == nil {
+            allSymbols[idx].targetName = sanitizeTargetName(targets.first?.name ?? projectName)
+        } else {
+            allSymbols[idx].targetName = sanitizeTargetName(allSymbols[idx].targetName!)
+        }
+    }
 
     let resources = scanResources(workspaceRoot: resolvedPath)
 
     emitProgress(phase: "resolving", processed: 0, total: 1)
 
-    let resolver = DependencyResolver(
+    let depResolver = DependencyResolver(
         fileSources: fileSources,
         symbols: allSymbols,
         resources: resources,
-        targets: [],
+        targets: targets,
         macros: [],
         publicOnlyTargets: []
     )
-    let result = resolver.resolve()
+    let result = depResolver.resolve()
 
-    let flatEntries = convertToFlatMap(result)
+    let flatEntries = convertToFlatMap(result, fileImportsMap: fileImports)
 
     let json = try safeEncodeToJSON(flatEntries, label: "FlatMapEntry")
 
@@ -88,25 +109,272 @@ func runDirectScan(_ mode: RunMode) throws {
     fputs("{\"_info\":\"Written \(flatEntries.count) entries to \(outputPath)\"}\n", stderr)
 }
 
-func convertToFlatMap(_ result: AnalysisResult) -> [FlatMapEntry] {
+func collectImportedModules(from result: AnalysisResult) -> Set<String> {
+    var modules = Set<String>()
+    for node in result.nodes {
+        if let target = node.targetName {
+            modules.insert(target)
+        }
+    }
+    for target in result.targets {
+        modules.insert(target.name)
+        for dep in target.dependencies {
+            modules.insert(dep)
+        }
+    }
+    return modules
+}
+
+func sanitizeTargetName(_ name: String) -> String {
+    let suffixes = ["_iOS", "_macOS", "_tvOS", "_watchOS", "_visionOS", "-iOS", "-macOS"]
+    var result = name
+    for suffix in suffixes {
+        if result.hasSuffix(suffix) {
+            result = String(result.dropLast(suffix.count))
+            break
+        }
+    }
+    return result
+}
+
+func convertToFlatMap(_ result: AnalysisResult, fileImportsMap: [String: [String]] = [:]) -> [FlatMapEntry] {
+    let objectFlavors: Set<String> = ["struct", "class", "enum", "actor", "protocol"]
+
     var outgoing: [String: [String]] = [:]
-    for link in result.links {
+    let callLinkTypes: Set<LinkType> = [.call, .observerTrigger, .crossTargetDependency]
+    for link in result.links where callLinkTypes.contains(link.type) {
         outgoing[link.sourceId, default: []].append(link.targetId)
     }
 
-    return result.nodes.map { node in
-        FlatMapEntry(
-            id: node.id,
-            name: node.name,
-            type: node.flavor.rawValue,
+    var inheritanceMap: [String: String] = [:]
+    var conformanceMap: [String: [String]] = [:]
+    for link in result.links {
+        if link.type == .inheritance {
+            if inheritanceMap[link.sourceId] == nil {
+                inheritanceMap[link.sourceId] = link.targetId
+            }
+        }
+        if link.type == .conformance {
+            conformanceMap[link.sourceId, default: []].append(link.targetId)
+        }
+    }
+
+    // Phase 1: Build Virtual Symbol Map from analyzed nodes (internal symbols)
+    var virtualSymbolMap: [String: String] = [:]
+    for node in result.nodes {
+        if objectFlavors.contains(node.flavor.rawValue) {
+            virtualSymbolMap[node.name] = sanitizeTargetName(node.targetName ?? "")
+        }
+    }
+
+    // Phase 2: Build import-to-module map from source files
+    let importedModules = collectImportedModules(from: result)
+    let internalModuleNames = Set(result.targets.map { sanitizeTargetName($0.name) })
+    let externalModules = importedModules.subtracting(internalModuleNames).subtracting(["Swift", "Foundation"])
+
+    var typeToTarget: [String: String] = [:]
+    let swiftPrimitives: Set<String> = ["Int", "String", "Bool", "Double", "Float", "Void", "Any", "Error", "Array", "Dictionary", "Set", "Optional", "Result", "Never", "AnyObject", "AnyHashable"]
+
+    // Level 3: Internal symbols from Virtual Symbol Map
+    for (typeName, target) in virtualSymbolMap {
+        typeToTarget[typeName] = target
+    }
+
+    // Level 1: Swift primitives
+    for prim in swiftPrimitives {
+        typeToTarget[prim] = "Swift"
+    }
+
+    let symbolById: [String: Node] = Dictionary(result.nodes.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+    let externalTargetNames = Set(result.targets.filter(\.isExternal).map(\.name))
+    let internalTargetNames = Set(result.targets.filter { !$0.isExternal }.map(\.name))
+
+    func filterSymbolRefs(_ ids: [String], currentTarget: String?) -> [String] {
+        var filtered: [String] = []
+        var seenTargets = Set<String>()
+        for id in ids {
+            let sym = symbolById[id]
+
+            if let sym, objectFlavors.contains(sym.flavor.rawValue) {
+                continue
+            }
+
+            let symTarget = sym?.targetName ?? currentTarget
+
+            if let t = symTarget, externalTargetNames.contains(t) {
+                if seenTargets.insert(t).inserted {
+                    filtered.append(t)
+                }
+                continue
+            }
+
+            filtered.append(namespacedID(id, target: symTarget))
+        }
+        return filtered
+    }
+
+    func aggregateTypesToTargets(_ types: [String]?, currentTarget: String?, sourceFile: String?) -> [String]? {
+        guard let types, !types.isEmpty else { return nil }
+        var results: [String] = []
+        var seenTargets = Set<String>()
+        var seenIds = Set<String>()
+
+        let systemFrameworks: Set<String> = ["Swift", "Foundation", "UIKit", "SwiftUI", "CoreFoundation", "CoreGraphics", "CoreData", "CoreLocation", "MapKit", "AVFoundation", "Photos", "Contacts", "EventKit", "StoreKit", "GameKit", "CloudKit", "WatchKit", "WidgetKit", "AppKit", "SceneKit", "SpriteKit", "Metal", "MetalKit", "CoreImage", "CoreText", "CoreAnimation", "QuartzCore", "Security", "CryptoKit", "os", "Dispatch", "ObjectiveC", "Darwin"]
+
+        let contextImports = sourceFile.flatMap { fileImportsMap[$0] } ?? []
+        let thirdPartyImports = contextImports.filter { !systemFrameworks.contains($0) && !internalModuleNames.contains($0) }
+
+        for typeName in types {
+            if swiftPrimitives.contains(typeName) { continue }
+
+            var owningTarget = typeToTarget[typeName]
+
+            if owningTarget == nil && thirdPartyImports.count == 1 {
+                owningTarget = thirdPartyImports[0]
+            }
+
+            if owningTarget == nil && !thirdPartyImports.isEmpty {
+                for imp in thirdPartyImports {
+                    if typeName.lowercased().contains(imp.lowercased().prefix(3).description) ||
+                       imp.lowercased().contains(typeName.lowercased().prefix(3).description) {
+                        owningTarget = imp
+                        break
+                    }
+                }
+            }
+
+            if owningTarget == nil {
+                if !seenIds.contains(typeName) {
+                    seenIds.insert(typeName)
+                    results.append(typeName)
+                }
+                continue
+            }
+
+            if owningTarget == "Swift" { continue }
+
+            if owningTarget == currentTarget {
+                if let sym = result.nodes.first(where: { $0.name == typeName && objectFlavors.contains($0.flavor.rawValue) }) {
+                    let nsId = namespacedID(sym.id, target: sym.targetName)
+                    if seenIds.insert(nsId).inserted {
+                        results.append(nsId)
+                    }
+                }
+                continue
+            }
+
+            if let target = owningTarget, seenTargets.insert(target).inserted {
+                results.append(target)
+            }
+        }
+        return results.isEmpty ? nil : results
+    }
+
+    func namespacedID(_ nodeId: String, target: String?) -> String {
+        let sanitizedId = nodeId.replacingOccurrences(of: ".", with: "::")
+        let t = (target == nil || target!.isEmpty) ? "UnknownTarget" : target!
+        return "\(t)::\(sanitizedId)"
+    }
+
+    func namespaceParent(_ parentId: String?, target: String?) -> String? {
+        guard let pid = parentId else { return nil }
+        if pid.hasPrefix("file:") { return pid }
+        return namespacedID(pid, target: target)
+    }
+
+    var entries: [FlatMapEntry] = []
+    var objectEntryIndex: [String: Int] = [:]
+
+    for node in result.nodes {
+        if node.flavor == .variable && (node.subKind == .stored || node.subKind == nil) {
+            continue
+        }
+
+        let isObject = objectFlavors.contains(node.flavor.rawValue)
+        let nsId = namespacedID(node.id, target: node.targetName)
+        let nsParent = namespaceParent(node.parent, target: node.targetName)
+            ?? node.parentFile.map { "file:\($0)" }
+        let parents = nsParent.map { [$0] } ?? []
+        let sigName = node.signature.map { "\(node.name)\($0)" } ?? node.name
+
+        if node.flavor == .initializer {
+            let nsParentId = namespacedID(node.parent ?? "", target: node.targetName)
+            if let idx = objectEntryIndex[nsParentId] {
+                let raw = (outgoing[node.id] ?? []).sorted()
+                let filtered = filterSymbolRefs(raw, currentTarget: node.targetName)
+                entries[idx].inits = (entries[idx].inits ?? []) + filtered
+            }
+            continue
+        }
+
+        if node.name == "deinit" && node.flavor == .function {
+            let nsParentId = namespacedID(node.parent ?? "", target: node.targetName)
+            if let idx = objectEntryIndex[nsParentId] {
+                let raw = (outgoing[node.id] ?? []).sorted()
+                let filtered = filterSymbolRefs(raw, currentTarget: node.targetName)
+                entries[idx].deinits = (entries[idx].deinits ?? []) + filtered
+            }
+            continue
+        }
+
+        var entry = FlatMapEntry(
+            id: nsId,
+            name: sigName,
+            flavor: node.flavor.rawValue,
             location: FlatLocation(
-                file: node.location.file,
+                absPath: node.location.file,
                 line: node.location.line,
                 col: node.location.column
             ),
-            connections: (outgoing[node.id] ?? []).sorted()
+            parents: parents
         )
+
+        if isObject {
+            var locs = [FlatObjectLocation(
+                absPath: node.location.file,
+                line: node.location.line,
+                col: node.location.column,
+                type: "primary"
+            )]
+            if let extFiles = node.extensions {
+                for f in extFiles {
+                    locs.append(FlatObjectLocation(absPath: f, line: 1, col: 1, type: "extension"))
+                }
+            }
+            entry.locations = locs
+            entry.sourceFiles = [node.sourceFile] + (node.extensions ?? [])
+            entry.inits = []
+            entry.deinits = []
+            entry.extends = inheritanceMap[node.id]
+            entry.implements = conformanceMap[node.id]?.sorted()
+            objectEntryIndex[nsId] = entries.count
+        } else {
+            if node.isProtocolRequirement {
+                entry.calls = nil
+            } else {
+                let rawCalls = (outgoing[node.id] ?? []).sorted()
+                entry.calls = filterSymbolRefs(rawCalls, currentTarget: node.targetName)
+            }
+            entry.returnTypes = aggregateTypesToTargets(node.returnTypes, currentTarget: node.targetName, sourceFile: node.sourceFile)
+            entry.parameterTypes = aggregateTypesToTargets(node.parameterTypes, currentTarget: node.targetName, sourceFile: node.sourceFile)
+
+            let frameworkTargetsInTypes = Set(
+                ((entry.returnTypes ?? []) + (entry.parameterTypes ?? []))
+                    .filter { !$0.contains("::") }
+            )
+            if let calls = entry.calls, !frameworkTargetsInTypes.isEmpty {
+                entry.calls = calls.filter { !frameworkTargetsInTypes.contains($0) }
+            }
+        }
+
+        if node.isProtocolRequirement {
+            entry.isProtocolRequirement = true
+        }
+
+        entries.append(entry)
     }
+
+    return entries
 }
 
 func discoverSwiftFiles(in directory: String) -> [String] {
@@ -211,12 +479,12 @@ func runFlagMode(_ args: [String]) throws {
         }
     }
 
-    var (allSymbols, fileSources) = scanFiles(filePaths)
+    let targetRes: TargetResolver? = workspaceRoot.map { TargetResolver(workspaceRoot: $0) }
+    var (allSymbols, fileSources, _) = scanFiles(filePaths, targets: targets, targetResolver: targetRes)
 
-    if !targets.isEmpty, let root = workspaceRoot {
-        let targetResolver = TargetResolver(workspaceRoot: root)
+    if !targets.isEmpty, let targetRes {
         for idx in allSymbols.indices {
-            allSymbols[idx].targetName = targetResolver.mapFileToTarget(allSymbols[idx].location.file, targets: targets)
+            allSymbols[idx].targetName = targetRes.mapFileToTarget(allSymbols[idx].location.file, targets: targets)
         }
     }
 
@@ -699,9 +967,11 @@ func extractMembers(of parentId: String, from result: AnalysisResult) -> Analysi
     )
 }
 
-func scanFiles(_ filePaths: [String]) -> ([SymbolInfo], [(path: String, tree: SourceFileSyntax)]) {
+func scanFiles(_ filePaths: [String], targets: [ParsedTarget] = [], targetResolver: TargetResolver? = nil) -> ([SymbolInfo], [(path: String, tree: SourceFileSyntax)], [String: [String]]) {
+    let extTargets = Set(targets.filter(\.isExternal).map(\.name))
     var allSymbols: [SymbolInfo] = []
     var fileSources: [(path: String, tree: SourceFileSyntax)] = []
+    var fileImportsMap: [String: [String]] = [:]
     let totalFiles = filePaths.count
     var processedFiles = 0
 
@@ -734,8 +1004,17 @@ func scanFiles(_ filePaths: [String]) -> ([SymbolInfo], [(path: String, tree: So
 
         do {
             let collector = SymbolCollector(filePath: path)
+            if let resolver = targetResolver {
+                collector.currentTarget = resolver.mapFileToTarget(path, targets: targets) ?? ""
+            }
+            collector.externalTargets = extTargets
             collector.walk(tree)
             allSymbols.append(contentsOf: collector.symbols)
+            if !collector.fileImports.isEmpty {
+                fileImportsMap[path] = collector.fileImports
+                let basename = URL(fileURLWithPath: path).lastPathComponent
+                fileImportsMap[basename] = collector.fileImports
+            }
         } catch {
             emitWarning("Symbol collection failed for \(path): \(error)")
         }
@@ -744,7 +1023,7 @@ func scanFiles(_ filePaths: [String]) -> ([SymbolInfo], [(path: String, tree: So
         emitProgress(phase: "scanning", processed: processedFiles, total: totalFiles)
     }
 
-    return (allSymbols, fileSources)
+    return (allSymbols, fileSources, fileImportsMap)
 }
 
 func shouldSkipFile(_ path: String) -> Bool {

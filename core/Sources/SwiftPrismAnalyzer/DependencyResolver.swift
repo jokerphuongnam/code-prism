@@ -17,6 +17,7 @@ struct DependencyResolver {
     func resolve() -> AnalysisResult {
         let knownNames = Set(symbols.map(\.name))
         let nameToID = buildNameToIDMap()
+        let qualifiedMap = buildQualifiedNameMap()
         let typeNames = Set(symbols.filter { [.struct, .class, .enum, .actor, .protocol].contains($0.flavor) }.map(\.name))
         let resourceNameToID = buildResourceNameToIDMap()
         let resourceNames = Set(resources.map(\.name))
@@ -24,8 +25,11 @@ struct DependencyResolver {
         let symbolTargetMap = buildSymbolTargetMap()
         let macroNameSet = Set(macros.map(\.name))
 
+        let externalTargetNames = Set(targets.filter(\.isExternal).map(\.name))
+
         var links: [Link] = []
         var seen: Set<String> = []
+        let obsMap = buildObserverMap()
 
         for (filePath, tree) in fileSources {
             let bodyFinder = BodyFinder()
@@ -43,23 +47,47 @@ struct DependencyResolver {
                 var refsByTarget: [String: [CallSiteRef]] = [:]
 
                 for call in collector.calls {
-                    guard let targetID = nameToID[call.callee], targetID != symbol.id else { continue }
-                    refsByTarget[targetID, default: []].append(CallSiteRef(
-                        line: call.line,
-                        column: call.column,
-                        snippet: call.snippet,
-                        file: call.file
-                    ))
+                    let ref = CallSiteRef(line: call.line, column: call.column, snippet: call.snippet, file: call.file)
+
+                    if let targetID = resolveQualifiedCall(call: call, nameToID: nameToID, qualifiedMap: qualifiedMap, callerParent: symbol.parent), targetID != symbol.id {
+                        let resolvedTarget = symbolTargetMap[targetID]
+                        let isExternalSymbol = resolvedTarget.flatMap { t in externalTargetNames.contains(t) } ?? false
+
+                        if isExternalSymbol, let t = resolvedTarget {
+                            refsByTarget[t, default: []].append(ref)
+                        } else {
+                            refsByTarget[targetID, default: []].append(ref)
+                        }
+                    } else if let externalTarget = resolveToExternalTarget(call: call, callerParent: symbol.parent) {
+                        refsByTarget[externalTarget, default: []].append(ref)
+                    }
                 }
 
                 for (targetID, refs) in refsByTarget {
                     let sourceTarget = symbolTargetMap[symbol.id]
                     let destTarget = symbolTargetMap[targetID]
                     let isCrossTarget = sourceTarget != nil && destTarget != nil && sourceTarget != destTarget
-                    let linkType: LinkType = isCrossTarget ? .crossTargetDependency : determineLinkType(call: CallRef(callee: "", isQualified: false, qualifier: nil, line: 0, column: 0, snippet: "", file: ""), targetID: targetID)
-                    let key = "\(symbol.id)->\(targetID):\(linkType.rawValue)"
-                    if seen.insert(key).inserted {
-                        links.append(Link(sourceId: symbol.id, targetId: targetID, type: linkType, confidence: nil, references: refs))
+
+                    if isCrossTarget {
+                        let key = "\(symbol.id)->\(targetID):cross_target_dependency"
+                        if seen.insert(key).inserted {
+                            links.append(Link(sourceId: symbol.id, targetId: targetID, type: .crossTargetDependency, confidence: nil, references: refs))
+                        }
+                    } else {
+                        let baseType = determineLinkType(call: CallRef(callee: "", isQualified: false, qualifier: nil, callSignature: nil, line: 0, column: 0, snippet: "", file: ""), targetID: targetID)
+                        if baseType == .access {
+                            for resolved in resolveAccessTarget(targetID: targetID, observerMap: obsMap) {
+                                let key = "\(symbol.id)->\(resolved.id):\(resolved.type.rawValue)"
+                                if seen.insert(key).inserted {
+                                    links.append(Link(sourceId: symbol.id, targetId: resolved.id, type: resolved.type, confidence: nil, references: refs))
+                                }
+                            }
+                        } else {
+                            let key = "\(symbol.id)->\(targetID):\(baseType.rawValue)"
+                            if seen.insert(key).inserted {
+                                links.append(Link(sourceId: symbol.id, targetId: targetID, type: baseType, confidence: nil, references: refs))
+                            }
+                        }
                     }
                 }
 
@@ -256,12 +284,16 @@ struct DependencyResolver {
                     parents: parents.isEmpty ? nil : parents,
                     implementers: isType ? implementersMap[sym.id] : nil,
                     superClass: superClassMap[sym.id],
-                    extensions: isType ? extFiles.map { Array($0).sorted() } : nil
+                    extensions: isType ? extFiles.map { Array($0).sorted() } : nil,
+                    signature: sym.signature,
+                    isProtocolRequirement: sym.isProtocolRequirement,
+                    returnTypes: sym.returnTypes,
+                    parameterTypes: sym.parameterTypes
                 )
             }
 
         let targetInfos = targets.map {
-            TargetInfo(name: $0.name, type: $0.type, path: $0.path, dependencies: $0.dependencies)
+            TargetInfo(name: $0.name, type: $0.type, path: $0.path, dependencies: $0.dependencies, isExternal: $0.isExternal, remoteURL: $0.remoteURL)
         }
 
         let macroNodes = macros.map {
@@ -353,6 +385,30 @@ struct DependencyResolver {
             }
         }
 
+        for sym in symbols {
+            let allTypes = (sym.returnTypes ?? []) + (sym.parameterTypes ?? [])
+            for typeName in allTypes {
+                if let targetId = nameToID[typeName] ?? typeNames.first(where: { $0 == typeName }) {
+                    if targetId == sym.id || targetId == sym.parent { continue }
+                    let key = "\(sym.id)->\(targetId):holds_type:\(typeName)"
+                    if seen.insert(key).inserted {
+                        links.append(Link(sourceId: sym.id, targetId: targetId, type: .holdsType, confidence: .medium, references: nil))
+                    }
+                } else {
+                    for target in targets where target.isExternal {
+                        let targetSymbols = symbols.filter { $0.targetName == target.name }
+                        if targetSymbols.contains(where: { $0.name == typeName }) {
+                            let key = "\(sym.id)->\(target.name):holds_type:\(typeName)"
+                            if seen.insert(key).inserted {
+                                links.append(Link(sourceId: sym.id, targetId: target.name, type: .holdsType, confidence: .low, references: nil))
+                            }
+                            break
+                        }
+                    }
+                }
+            }
+        }
+
         return AnalysisResult(projectRoot: nil, nodes: allNodes, links: links, resources: resources, targets: targetInfos, macros: macroNodes, moduleNodes: nil)
     }
 
@@ -395,10 +451,91 @@ struct DependencyResolver {
         return map
     }
 
+    private func buildQualifiedNameMap() -> [String: String] {
+        var map: [String: String] = [:]
+        for s in symbols {
+            if let parent = s.parent {
+                map["\(parent).\(s.name)"] = s.id
+                if let sig = s.signature {
+                    map["\(parent).\(s.name)\(sig)"] = s.id
+                }
+            }
+        }
+        return map
+    }
+
+    private func resolveQualifiedCall(call: CallRef, nameToID: [String: String], qualifiedMap: [String: String], callerParent: String?) -> String? {
+        let calleeName = call.callee
+        let calleeSigned = call.callSignature.map { "\(calleeName)\($0)" } ?? calleeName
+
+        if call.isQualified, let qualifier = call.qualifier {
+            for key in ["\(qualifier).\(calleeSigned)", "\(qualifier).\(calleeName)"] {
+                if let id = qualifiedMap[key] { return id }
+            }
+
+            let qualifierType = symbols.first { $0.name == qualifier && $0.parent == callerParent }?.resolvedType
+                ?? symbols.first { $0.name == qualifier }?.resolvedType
+
+            if let typeName = qualifierType {
+                for key in ["\(typeName).\(calleeSigned)", "\(typeName).\(calleeName)"] {
+                    if let id = qualifiedMap[key] { return id }
+                }
+
+                for s in symbols where s.name == typeName && s.flavor == .variable {
+                    if let deepType = s.resolvedType {
+                        for key in ["\(deepType).\(calleeSigned)", "\(deepType).\(calleeName)"] {
+                            if let id = qualifiedMap[key] { return id }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let id = nameToID[calleeSigned] { return id }
+        return nameToID[calleeName]
+    }
+
     private func buildResourceNameToIDMap() -> [String: String] {
         var map: [String: String] = [:]
         for r in resources where map[r.name] == nil {
             map[r.name] = r.id
+        }
+        return map
+    }
+
+    private func resolveToExternalTarget(call: CallRef, callerParent: String?) -> String? {
+        guard call.isQualified, let qualifier = call.qualifier else { return nil }
+
+        let qualifierSym = symbols.first { $0.name == qualifier && $0.parent == callerParent }
+            ?? symbols.first { $0.name == qualifier }
+
+        if let sym = qualifierSym, let resolvedType = sym.resolvedType {
+            if let target = targets.first(where: { $0.isExternal && $0.name == resolvedType }) {
+                return target.name
+            }
+            for target in targets where target.isExternal {
+                let targetSymbols = symbols.filter { $0.targetName == target.name }
+                if targetSymbols.contains(where: { $0.name == resolvedType }) {
+                    return target.name
+                }
+            }
+        }
+
+        for target in targets where target.isExternal {
+            if target.name == qualifier {
+                return target.name
+            }
+        }
+
+        return nil
+    }
+
+    private func buildObserverMap() -> [String: [String]] {
+        var map: [String: [String]] = [:]
+        for sym in symbols where sym.subKind == .willSet || sym.subKind == .didSet {
+            let varName = sym.name.components(separatedBy: ".").first ?? sym.name
+            let varID = sym.parent.map { "\($0).\(varName)" } ?? varName
+            map[varID, default: []].append(sym.id)
         }
         return map
     }
@@ -409,15 +546,17 @@ struct DependencyResolver {
         return .call
     }
 
+    private func resolveAccessTarget(targetID: String, observerMap: [String: [String]]) -> [(id: String, type: LinkType)] {
+        if let observers = observerMap[targetID], !observers.isEmpty {
+            return observers.map { (id: $0, type: .observerTrigger) }
+        }
+        return [(id: targetID, type: .access)]
+    }
+
     private func collectObserverTriggerLinks(symbol: SymbolInfo, bodyNode: Syntax, nameToID: [String: String], seen: inout Set<String>, links: inout [Link]) {
         guard symbol.subKind == .willSet || symbol.subKind == .didSet else { return }
         let varName = symbol.name.components(separatedBy: ".").first ?? symbol.name
-        let varID: String
-        if let parent = symbol.parent {
-            varID = "\(parent).\(varName)"
-        } else {
-            varID = varName
-        }
+        let varID = symbol.parent.map { "\($0).\(varName)" } ?? varName
 
         let key = "\(varID)->\(symbol.id):observer_trigger"
         if seen.insert(key).inserted {
@@ -465,7 +604,8 @@ private final class BodyFinder: SyntaxVisitor {
 
     override func visit(_ node: FunctionDeclSyntax) -> SyntaxVisitorContinueKind {
         if let body = node.body {
-            bodies[makeID(name: node.name.text)] = Syntax(body)
+            let sig = extractSig(from: node.signature.parameterClause)
+            bodies[makeID(name: node.name.text, signature: sig)] = Syntax(body)
         }
         return .visitChildren
     }
@@ -486,14 +626,26 @@ private final class BodyFinder: SyntaxVisitor {
 
     override func visit(_ node: InitializerDeclSyntax) -> SyntaxVisitorContinueKind {
         if let body = node.body {
-            bodies[makeID(name: "init")] = Syntax(body)
+            let sig = extractSig(from: node.signature.parameterClause)
+            bodies[makeID(name: "init", signature: sig)] = Syntax(body)
         }
         return .visitChildren
     }
 
-    private func makeID(name: String) -> String {
-        if let parent = containerStack.last { return "\(parent).\(name)" }
-        return name
+    private func makeID(name: String, signature: String? = nil) -> String {
+        let fullName = signature.map { "\(name)\($0)" } ?? name
+        if let parent = containerStack.last { return "\(parent).\(fullName)" }
+        return fullName
+    }
+
+    private func extractSig(from clause: FunctionParameterClauseSyntax) -> String? {
+        let params = clause.parameters
+        if params.isEmpty { return "()" }
+        let labels = params.map { p -> String in
+            let label = p.firstName.text
+            return label == "_" ? "_:" : "\(label):"
+        }
+        return "(\(labels.joined()))"
     }
 }
 

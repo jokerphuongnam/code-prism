@@ -142,21 +142,51 @@ These are only emitted when the literal is not already inside a known resource c
 |---|---|---|
 | Types | Purple `S` | All struct/class/enum/actor/protocol declarations |
 | Resources | Blue `R` | All discovered assets and files |
-| Resource Usage | Blue `R` | Direct `resource_link` connections with confidence |
+| Resource Usage | Blue `R` | Direct `resource_link` calls with confidence |
 | Static Resource Aliases | Indigo `A` | Extension static properties mapped to assets |
 | Heuristic Matches | Orange `H` | String literal matches with confidence badges |
 | Documentation | Blue `R` | Detected `.md` files |
 
 ### Confidence Badges
 
-Each resource connection in the Guide shows a colored confidence badge:
+Each resource link in the Guide shows a colored confidence badge:
 - **High** — Green — Direct API, static alias, protocol member, or exact heuristic match
 - **Medium** — Orange — Custom wrapper function match
 - **Low** — Red — Future fuzzy/partial matches
 
 ### Interactive Highlighting
 
-Hovering any item in the Guide highlights all related node IDs in the 3D graph. For resource connections, both the source symbol and target resource are highlighted simultaneously.
+Hovering any item in the Guide highlights all related node IDs in the 3D graph. For resource links, both the source symbol and target resource are highlighted simultaneously.
+
+## Target-Grouped Resources (v3.1)
+
+In the v3.1 hierarchical schema, resources are grouped per-target. Each target has its own `resources: []` array containing only the resources that belong to that target.
+
+### Structure
+
+```json
+{
+  "targets": [
+    {
+      "name": "MyApp",
+      "resources": [
+        { "id": "asset:MyApp/Assets/home_banner", "name": "home_banner", "type": "image_set" },
+        { "id": "asset:MyApp/Assets/primary", "name": "primary", "type": "color_set" }
+      ]
+    },
+    {
+      "name": "DesignSystem",
+      "resources": [
+        { "id": "asset:DesignSystem/Assets/accent", "name": "accent", "type": "color_set" }
+      ]
+    }
+  ]
+}
+```
+
+Resources are assigned to a target by checking which target's directory contains the `.xcassets` catalog or resource file. If a resource cannot be mapped to any target (e.g. root-level assets), it is placed under the app's main target or the synthetic `"unknown"` target.
+
+All existing matching strategies (Strategies 1-5) continue to work identically -- the only change is where the resulting resource nodes and links are placed in the output tree.
 
 ## Edge Cases
 

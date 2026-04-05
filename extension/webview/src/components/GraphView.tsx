@@ -42,6 +42,7 @@ interface GraphNode {
   isGlobal: boolean;
   isFileNode: boolean;
   isInteresting: boolean;
+  isProtocolRequirement: boolean;
   hidden: boolean;
   parentId: string | null;
   parentFile: string | null;
@@ -188,7 +189,7 @@ function buildFullNodeList(
       isModule: false,
       isMacroModule: false,
       isGlobal: false,
-      isFileNode: true, isInteresting: true,
+      isFileNode: true, isInteresting: true, isProtocolRequirement: false,
       hidden: false,
       parentId: null,
       parentFile: null,
@@ -219,7 +220,7 @@ function buildFullNodeList(
       isModule,
       isMacroModule: moduleInfo?.isMacro ?? false,
       isGlobal: n.isGlobal,
-      isFileNode: false, isInteresting: n.isInteresting,
+      isFileNode: false, isInteresting: n.isInteresting, isProtocolRequirement: n.isProtocolRequirement ?? false,
       hidden: false,
       parentId: n.parent,
       parentFile: n.parentFile ?? null,
@@ -249,7 +250,7 @@ function buildFullNodeList(
         isModule: false,
         isMacroModule: false,
         isGlobal: false,
-        isFileNode: false, isInteresting: true,
+        isFileNode: false, isInteresting: true, isProtocolRequirement: false,
       hidden: false,
         parentId: r.parentGroup,
         parentFile: null,
@@ -293,11 +294,43 @@ function computeVisibility(
   return visible;
 }
 
+/**
+ * Resolve a call target ID to the best matching graph node.
+ * Hierarchical calls use Target::File::Object::Member IDs which may not match
+ * flat graph node IDs directly. Walk up the :: segments to find the nearest parent.
+ */
+function resolveCallTargetToGraphNode(
+  callTarget: string,
+  allNodeIds: Set<string>,
+  nodeById: Map<string, GraphNode>
+): string | null {
+  // Direct match
+  if (allNodeIds.has(callTarget)) return callTarget;
+
+  // Strip segments from the right to find nearest parent
+  const parts = callTarget.split("::");
+  for (let i = parts.length - 1; i >= 1; i--) {
+    const candidate = parts.slice(0, i).join("::");
+    if (allNodeIds.has(candidate)) return candidate;
+  }
+
+  // Try matching by name (last segment) — handles flat IDs like "ClassName.methodName"
+  const leafName = parts[parts.length - 1];
+  for (const [id, node] of nodeById) {
+    if (node.name === leafName || id.endsWith(`.${leafName}`) || id.endsWith(`::${leafName}`)) {
+      return id;
+    }
+  }
+
+  return null;
+}
+
 function buildFullGraphData(
   allNodes: GraphNode[],
   result: AnalysisResult,
   visibleLinkTypes: Set<LinkType>,
-  visibleNodeIds: Set<string>
+  visibleNodeIds: Set<string>,
+  showStructural: boolean = true
 ): { nodes: GraphNode[]; links: GraphLink[] } {
   const allNodeIds = new Set(allNodes.map((n) => n.id));
   const nodeById = new Map(allNodes.map((n) => [n.id, n]));
@@ -319,84 +352,127 @@ function buildFullGraphData(
     return null;
   };
 
-  let brokenCount = 0;
-  let relinkCount = 0;
-
-  for (const l of result.links) {
-    if (!allNodeIds.has(l.source_id) || !allNodeIds.has(l.target_id)) {
-      brokenCount++;
-      continue;
-    }
-
-    const typeVisible = visibleLinkTypes.has(l.type) || l.type === "nesting";
-
-    let effectiveSource = l.source_id;
-    let effectiveTarget = l.target_id;
+  const addLink = (
+    source: string,
+    target: string,
+    type: GraphLink["linkType"],
+    refs?: GraphLink["references"]
+  ) => {
+    let effectiveSource = source;
+    let effectiveTarget = target;
 
     if (!visibleNodeIds.has(effectiveSource)) {
       const ancestor = resolveVisibleAncestor(effectiveSource);
-      if (ancestor) { effectiveSource = ancestor; relinkCount++; }
+      if (ancestor) effectiveSource = ancestor;
     }
     if (!visibleNodeIds.has(effectiveTarget)) {
       const ancestor = resolveVisibleAncestor(effectiveTarget);
-      if (ancestor) { effectiveTarget = ancestor; relinkCount++; }
+      if (ancestor) effectiveTarget = ancestor;
     }
 
-    if (effectiveSource === effectiveTarget) continue;
+    if (effectiveSource === effectiveTarget) return;
+    if (!allNodeIds.has(effectiveSource) || !allNodeIds.has(effectiveTarget)) return;
 
+    const isStructural = type === "nesting";
+    const typeVisible = (visibleLinkTypes.has(type as LinkType) || isStructural);
     const visible = typeVisible && visibleNodeIds.has(effectiveSource) && visibleNodeIds.has(effectiveTarget);
-    const key = `${effectiveSource}->${effectiveTarget}:${l.type}`;
-    if (seenLinks.has(key)) continue;
+
+    const key = `${effectiveSource}->${effectiveTarget}:${type}`;
+    if (seenLinks.has(key)) return;
     seenLinks.add(key);
 
     links.push({
       source: effectiveSource,
       target: effectiveTarget,
-      linkType: l.type,
-      color: linkColor(l.type),
-      width: l.type === "nesting" ? 3 : linkWidth(l.type),
+      linkType: type,
+      color: linkColor(type as LinkType),
+      width: isStructural ? 3 : linkWidth(type as LinkType),
       hidden: !visible,
-      references: l.references,
+      references: refs,
     });
+  };
+
+  // ─── Pass 1: Links from flat result.links (backward-compatible) ───
+  let brokenCount = 0;
+  for (const l of result.links) {
+    if (!allNodeIds.has(l.source_id) || !allNodeIds.has(l.target_id)) {
+      brokenCount++;
+      continue;
+    }
+    addLink(l.source_id, l.target_id, l.type, l.references);
   }
 
   if (brokenCount > 0) {
-    console.warn(`[SwiftPrism] ${brokenCount} links dropped: source or target node not in graph`);
-  }
-  if (relinkCount > 0) {
-    console.info(`[SwiftPrism] ${relinkCount} links auto-relinked to visible ancestor`);
+    console.warn(`[SwiftPrism] ${brokenCount} links dropped: source or target not in graph`);
   }
 
-  for (const n of allNodes) {
-    if (n.isGlobal && n.fileNodeId && allNodeIds.has(n.fileNodeId)) {
-      const key = `${n.fileNodeId}->${n.id}:file_containment`;
-      if (!seenLinks.has(key)) {
-        seenLinks.add(key);
-        links.push({
-          source: n.fileNodeId,
-          target: n.id,
-          linkType: "file_containment",
-          color: FILE_LINK_COLOR,
-          width: 0.3,
-          hidden: !visibleNodeIds.has(n.fileNodeId) || !visibleNodeIds.has(n.id),
-        });
-      }
+  // ─── Pass 2: Recover broken links via parent-ID fallback ───
+  // Links where source or target wasn't found in the graph (brokenCount from Pass 1).
+  // Use resolveCallTargetToGraphNode to walk up the :: namespace and find the
+  // nearest ancestor that IS in the graph.
+  let recoveredCount = 0;
+  for (const l of result.links) {
+    const srcInGraph = allNodeIds.has(l.source_id);
+    const tgtInGraph = allNodeIds.has(l.target_id);
+    if (srcInGraph && tgtInGraph) continue; // already handled in Pass 1
+
+    const resolvedSrc = srcInGraph
+      ? l.source_id
+      : resolveCallTargetToGraphNode(l.source_id, allNodeIds, nodeById);
+    const resolvedTgt = tgtInGraph
+      ? l.target_id
+      : resolveCallTargetToGraphNode(l.target_id, allNodeIds, nodeById);
+
+    if (resolvedSrc && resolvedTgt && resolvedSrc !== resolvedTgt) {
+      addLink(resolvedSrc, resolvedTgt, l.type, l.references);
+      recoveredCount++;
     }
-    if (n.flavor === "resource" && n.parentId && allNodeIds.has(n.parentId)) {
-      const key = `${n.parentId}->${n.id}:resource_containment`;
+  }
+
+  if (recoveredCount > 0) {
+    console.info(`[SwiftPrism] ${recoveredCount} links recovered via parent-ID fallback`);
+  }
+
+  // ─── Pass 3: Nesting links from parents[] ancestry ───
+  // Every node with a parentId gets a nesting link to its parent.
+  // This is the hierarchical parent→child relationship from the scope stack.
+  let nestingCount = 0;
+  for (const n of allNodes) {
+    if (n.parentId && allNodeIds.has(n.parentId) && n.parentId !== n.id) {
+      const key = `${n.parentId}->${n.id}:nesting`;
       if (!seenLinks.has(key)) {
-        seenLinks.add(key);
-        links.push({
-          source: n.parentId,
-          target: n.id,
-          linkType: "resource_containment",
-          color: "rgba(102,187,106,0.3)",
-          width: 0.5,
-          hidden: !visibleNodeIds.has(n.parentId) || !visibleNodeIds.has(n.id),
-        });
+        addLink(n.parentId, n.id, "nesting");
+        nestingCount++;
       }
     }
   }
+
+  // ─── Pass 4: Structural links (file→object, resource containment) ───
+  // File→Object links are a secondary "Structural" layer, togglable via showStructural.
+  // Object→Member links (nesting) are always shown since they're execution-primary.
+  if (showStructural) {
+    for (const n of allNodes) {
+      if (n.isGlobal && n.fileNodeId && allNodeIds.has(n.fileNodeId)) {
+        addLink(n.fileNodeId, n.id, "file_containment");
+      }
+      if (n.isFileNode && n.parentId === null) {
+        const childObjects = allNodes.filter((c) => c.parentFile === n.name && !c.parentId && !c.isGlobal && allNodeIds.has(c.id));
+        for (const child of childObjects) {
+          addLink(n.id, child.id, "file_containment");
+        }
+      }
+    }
+  }
+  for (const n of allNodes) {
+    if (n.flavor === "resource" && n.parentId && allNodeIds.has(n.parentId)) {
+      addLink(n.parentId, n.id, "resource_containment");
+    }
+  }
+
+  if (nestingCount > 0) {
+    console.info(`[SwiftPrism] ${nestingCount} nesting links from parents[] ancestry`);
+  }
+  console.log("CORE: Hierarchical Analyzer Activated");
 
   return { nodes, links };
 }
@@ -413,7 +489,7 @@ const spriteCache = new Map<string, THREE.SpriteMaterial>();
 const dotCache = new Map<string, THREE.SpriteMaterial>();
 
 function buildSpriteKey(n: GraphNode, lod: "full" | "dot"): string {
-  return `${lod}|${n.color}|${n.shape}|${n.size}|${n.isHighlighted ? 1 : 0}|${n.isGlobal ? "g" : ""}|${n.isFileNode ? "f" : ""}|${lod === "full" ? n.name.slice(0, 20) : ""}`;
+  return `${lod}|${n.color}|${n.shape}|${n.size}|${n.isHighlighted ? 1 : 0}|${n.isGlobal ? "g" : ""}|${n.isFileNode ? "f" : ""}|${n.isProtocolRequirement ? "pr" : ""}|${lod === "full" ? n.name.slice(0, 20) : ""}`;
 }
 
 function createSpriteTexture(n: GraphNode, lod: "full" | "dot"): THREE.SpriteMaterial {
@@ -435,7 +511,17 @@ function createSpriteTexture(n: GraphNode, lod: "full" | "dot"): THREE.SpriteMat
     ctx.globalAlpha = n.isGlobal ? 0.5 : n.isHighlighted ? 1 : 0.8;
     ctx.fill();
   } else {
-    if (n.isHighlighted) {
+    if (n.isProtocolRequirement) {
+      ctx.beginPath();
+      ctx.arc(res / 2, res / 2, res / 2 - 4, 0, Math.PI * 2);
+      ctx.setLineDash([6, 4]);
+      ctx.strokeStyle = n.color;
+      ctx.lineWidth = 2;
+      ctx.globalAlpha = 0.6;
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
+    } else if (n.isHighlighted) {
       ctx.beginPath();
       ctx.arc(res / 2, res / 2, res / 2 - 2, 0, Math.PI * 2);
       ctx.fillStyle = n.color;
@@ -544,9 +630,11 @@ function restoreNeighborHighlight(nodeId: string, graph: ForceGraph3DInstance) {
 
 function FilterPanel({
   linkTypes, visibleLinkTypes, onToggle, collapsed, onToggleCollapse, totalNodes, visibleNodes,
+  showStructural, onToggleStructural,
 }: {
   linkTypes: LinkType[]; visibleLinkTypes: Set<LinkType>; onToggle: (type: LinkType) => void;
   collapsed: boolean; onToggleCollapse: () => void; totalNodes: number; visibleNodes: number;
+  showStructural: boolean; onToggleStructural: () => void;
 }) {
   const [open, setOpen] = useState(false);
   return (
@@ -557,13 +645,20 @@ function FilterPanel({
       {open && (
         <div style={filterStyles.panel}>
           <div style={filterStyles.section}>
-            <span style={filterStyles.label}>Connections</span>
+            <span style={filterStyles.label}>Execution</span>
             {linkTypes.map((lt) => (
               <label key={lt} style={filterStyles.row}>
                 <input type="checkbox" checked={visibleLinkTypes.has(lt)} onChange={() => onToggle(lt)} style={filterStyles.checkbox} />
                 <span style={{ color: linkColor(lt) }}>{LINK_TYPE_LABELS[lt] || lt}</span>
               </label>
             ))}
+          </div>
+          <div style={filterStyles.section}>
+            <span style={filterStyles.label}>Structural</span>
+            <label style={filterStyles.row}>
+              <input type="checkbox" checked={showStructural} onChange={onToggleStructural} style={filterStyles.checkbox} />
+              <span style={{ color: FILE_NODE_COLOR }}>File → Object</span>
+            </label>
           </div>
           {totalNodes > COLLAPSE_THRESHOLD && (
             <div style={filterStyles.section}>
@@ -589,6 +684,7 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
   const [expandedParents, setExpandedParents] = useState<Set<string>>(new Set());
   const [expandedModules, setExpandedModules] = useState<Set<string>>(new Set());
   const [collapsed, setCollapsed] = useState(false);
+  const [showStructural, setShowStructural] = useState(true);
   const animFrameRef = useRef<number>(0);
   const lastClickRef = useRef<{ id: string; time: number }>({ id: "", time: 0 });
   const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null);
@@ -597,8 +693,12 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
     id: string; name: string; flavor: string; subKind: string | null;
     isStatic: boolean; isGlobal: boolean; isModule: boolean;
     parentId: string | null; sourceFile: string; memberCount: number | null; color: string;
+    targetName: string | null;
   } | null>(null);
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cardHoveredRef = useRef(false);
+  const [cardPinned, setCardPinned] = useState(false);
   const initialLoadDone = useRef(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
@@ -611,8 +711,17 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
   const expandedParentsRef = useRef<Set<string>>(new Set());
   const expandedModulesRef = useRef<Set<string>>(new Set());
 
+  const [schemaError, setSchemaError] = useState<string | null>(null);
+
   const allNodes = useMemo(() => {
     if (!result) return [];
+    const hasLegacy = result.nodes.some((n: any) => "connections" in n);
+    if (hasLegacy) {
+      console.error("[SwiftPrism] CRITICAL: Old Schema Detected. Aborting Render.");
+      setSchemaError("System Reset Required: Old Data Format Found. Re-run analysis with v4.0.");
+      return [];
+    }
+    setSchemaError(null);
     return buildFullNodeList(result, highlightedIds);
   }, [result, highlightedIds]);
 
@@ -644,8 +753,8 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
 
   const graphData = useMemo(() => {
     if (!result) return { nodes: [] as GraphNode[], links: [] as GraphLink[] };
-    return buildFullGraphData(allNodes, result, visibleLinkTypes, visibleNodeIds);
-  }, [allNodes, result, visibleLinkTypes, visibleNodeIds]);
+    return buildFullGraphData(allNodes, result, visibleLinkTypes, visibleNodeIds, showStructural);
+  }, [allNodes, result, visibleLinkTypes, visibleNodeIds, showStructural]);
 
 
   const handleToggleLink = useCallback((type: LinkType) => {
@@ -767,6 +876,7 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
       .onNodeClick(handleNodeClick)
       .onNodeHover((node: unknown, prevNode: unknown) => {
         if (hoverTimerRef.current) { clearTimeout(hoverTimerRef.current); hoverTimerRef.current = null; }
+        if (hideTimerRef.current) { clearTimeout(hideTimerRef.current); hideTimerRef.current = null; }
 
         if (prevNode) {
           const prev = prevNode as GraphNode;
@@ -779,10 +889,16 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
         }
 
         if (!node) {
-          setHoveredNodeId(null);
-          setHoveredNodeInfo(null);
-          setHoverPos(null);
-          onClearPreview?.();
+          // Delayed hide: give user 150ms to move mouse into the card
+          hideTimerRef.current = setTimeout(() => {
+            if (!cardHoveredRef.current) {
+              setHoveredNodeId(null);
+              setHoveredNodeInfo(null);
+              setHoverPos(null);
+              setCardPinned(false);
+              onClearPreview?.();
+            }
+          }, 150);
           return;
         }
         const n = node as GraphNode;
@@ -797,11 +913,13 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
         const screen = graph.graph2ScreenCoords(n.x ?? 0, n.y ?? 0, n.z ?? 0);
         setHoverPos({ x: screen.x, y: screen.y });
         setHoveredNodeId(n.id);
+        setCardPinned(true);
         setHoveredNodeInfo({
           id: n.id, name: n.name, flavor: n.flavor, subKind: n.subKind,
           isStatic: n.isStatic, isGlobal: n.isGlobal, isModule: n.isModule,
           parentId: n.parentId, sourceFile: n.sourceFile,
           memberCount: n.memberCount, color: n.color,
+          targetName: n.targetName,
         });
         hoverTimerRef.current = setTimeout(() => {
           if (n.location.file && onRequestFilePreview) {
@@ -1150,7 +1268,7 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
     if (!graphRef.current || !query.trim()) return;
     const q = query.toLowerCase();
     const nodes = graphRef.current.graphData().nodes as GraphNode[];
-    const match = nodes.find((n) => !n.hidden && n.name.toLowerCase().includes(q));
+    const match = nodes.find((n) => !n.hidden && (n.name.toLowerCase().includes(q) || n.id.toLowerCase().includes(q)));
     if (match) {
       flyToNode(match);
       setSelectedNode(match);
@@ -1158,6 +1276,15 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
       setSearchQuery("");
     }
   }, [flyToNode]);
+
+  if (schemaError) {
+    return (
+      <div style={{ ...styles.empty, color: "#EF5350", flexDirection: "column", gap: 8 }}>
+        <div style={{ fontSize: "1.2em", fontWeight: 700 }}>System Reset Required</div>
+        <div style={{ fontSize: "0.85em", opacity: 0.7 }}>{schemaError}</div>
+      </div>
+    );
+  }
 
   if (!result) return <div style={styles.empty}>Run analysis to see the dependency graph.</div>;
 
@@ -1207,10 +1334,29 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
         position={hoverPos}
         containerWidth={containerRef.current?.clientWidth ?? 600}
         containerHeight={containerRef.current?.clientHeight ?? 400}
+        result={result}
+        pinned={cardPinned}
+        onMouseEnterCard={() => {
+          cardHoveredRef.current = true;
+          if (hideTimerRef.current) { clearTimeout(hideTimerRef.current); hideTimerRef.current = null; }
+        }}
+        onMouseLeaveCard={() => {
+          cardHoveredRef.current = false;
+          hideTimerRef.current = setTimeout(() => {
+            if (!cardHoveredRef.current) {
+              setHoveredNodeId(null);
+              setHoveredNodeInfo(null);
+              setHoverPos(null);
+              setCardPinned(false);
+              onClearPreview?.();
+            }
+          }, 100);
+        }}
       />
 
       <FilterPanel linkTypes={presentLinkTypes} visibleLinkTypes={visibleLinkTypes} onToggle={handleToggleLink}
-        collapsed={collapsed} onToggleCollapse={handleToggleCollapse} totalNodes={allNodes.length} visibleNodes={visibleNodeIds.size} />
+        collapsed={collapsed} onToggleCollapse={handleToggleCollapse} totalNodes={allNodes.length} visibleNodes={visibleNodeIds.size}
+        showStructural={showStructural} onToggleStructural={() => setShowStructural((p) => !p)} />
 
       {clickedLink && linkMenuPos && clickedLink.references && clickedLink.references.length > 0 && (
         <div style={{ ...callSiteStyles.menu, left: linkMenuPos.x + 12, top: linkMenuPos.y - 20 }}>

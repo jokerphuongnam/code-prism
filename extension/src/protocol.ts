@@ -90,6 +90,10 @@ export interface PrismNode {
   location: SourceLocation;
   targetName: string | null;
   memberCount: number | null;
+  /** Argument label signature for overload disambiguation, e.g. "(id:)" or "(data:metadata:)".
+   *  Emitted by the Swift binary for functions and initializers. */
+  signature?: string | null;
+  isProtocolRequirement?: boolean;
 }
 
 export interface ResourceNode {
@@ -132,6 +136,8 @@ export interface PrismLink {
   type: LinkType;
   confidence: LinkConfidence | null;
   references: CallSiteRef[] | null;
+  /** Argument labels at the call site, e.g. "(id:)" — used to resolve the correct overload */
+  targetSignature?: string | null;
 }
 
 export interface ModuleNode {
@@ -169,4 +175,93 @@ export interface ProgressInfo {
   phase: AnalysisPhase;
   processed: number;
   total: number;
+}
+
+// ─── Flat Graph Schema (v4.0) ───
+
+export interface SourcePosition {
+  line: number;
+  col: number;
+  absPath: string;
+}
+
+export interface ObjectLocation extends SourcePosition {
+  type: "primary" | "extension";
+}
+
+export type ExecutionBlockKind =
+  | "func"
+  | "init"
+  | "deinit"
+  | "get"
+  | "set"
+  | "willSet"
+  | "didSet"
+  | "var_body";
+
+export interface CallRef {
+  target: string;
+  location: SourcePosition;
+}
+
+/**
+ * A single node in the flat graph. Every object, member, init, deinit,
+ * and global function is a top-level entry. NO nesting.
+ *
+ * Hierarchy is expressed purely through `parents`:
+ *   - Member parents: ["Target::ClassName"]
+ *   - Object parents: ["FileName.swift"] or ["Target::ParentObject"]
+ *   - File parents: (not emitted — files are implicit)
+ *
+ * To find all members of a class: filter for nodes where parents includes that class ID.
+ */
+export interface FlatGraphNode {
+  id: string;
+  name: string;
+  flavor: SymbolFlavor;
+  /** Single location for members (func, init, willSet, etc.) — points to the exact block start */
+  location: SourcePosition;
+  parents: string[];
+  calls: CallRef[];
+
+  /** Object-only: all locations where this type is declared or extended, with "primary"/"extension" type */
+  locations?: ObjectLocation[];
+  /** Object-only: files where defined/extended */
+  sourceFiles?: string[];
+  /** Object-only: superclass ID (null if none) */
+  extends?: string | null;
+  /** Object-only: protocol conformance IDs */
+  implements?: string[];
+  /** Object-only: fast-track init IDs (strings, not full objects) */
+  inits?: string[];
+  /** Object-only: fast-track deinit IDs (strings, not full objects) */
+  deinits?: string[];
+  isProtocolRequirement?: boolean;
+  returnTypes?: string[];
+  parameterTypes?: string[];
+}
+
+export interface EntryPointNode {
+  id: string;
+  kind: "@main" | "main.swift" | "AppDelegate";
+  location: SourcePosition;
+  parents: string[];
+  calls: CallRef[];
+}
+
+export interface TargetGroup {
+  name: string;
+  type: TargetType;
+  path: string;
+  dependencies: string[];
+  isExternal: boolean;
+  entryPoint: EntryPointNode | null;
+  resources: ResourceNode[];
+}
+
+export interface FlatGraphResult {
+  schemaVersion: string;
+  projectRoot: string;
+  targets: TargetGroup[];
+  nodes: FlatGraphNode[];
 }

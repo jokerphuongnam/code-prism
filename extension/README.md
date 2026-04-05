@@ -9,7 +9,7 @@ extension/
 ├── src/                          # Extension Host (Node.js)
 │   ├── extension.ts              # Activation, process lifecycle, command wiring
 │   ├── explorerViewProvider.ts   # Serves React bundle, postMessage bridge
-│   ├── analyzerBridge.ts         # Buffer-based spawn, progress parsing, error extraction
+│   ├── analyzerBridge.ts         # Buffer-based spawn, progress parsing, hierarchical transformation
 │   ├── swiftFileDiscovery.ts     # Workspace .swift file scanner
 │   └── protocol.ts              # Shared types + progress protocol
 │
@@ -88,15 +88,18 @@ The bottom status bar shows live analysis progress:
 ```
 Extension Host                          React Webview
 ──────────────                          ─────────────
-spawn binary
+spawn binary (LOGIC_VERSION: "3.1-scope-stack")
   ├─ stderr: {"_progress":...}  ──▶     progress message  ──▶ StatusBar
   ├─ stderr: {"_warning":...}   ──▶     vscode warning toast
   └─ stdout: Buffer[]
        ├─ concat + JSON.parse
+       ├─ transformToFlat()     (scope-stack walk → hierarchical schema)
        └─ postMessage ──────────────▶   analysisResult     ──▶ GraphView/JsonPreview
                                                                  └─ save to LKG ref
                        ◀────────────    analyzeRequest     ◀──  Header button click
 ```
+
+The `analyzerBridge.ts` bridge receives intermediate JSON from the Swift binary, then runs `transformToFlat()` to produce the v4.0 flat-graph schema. All nodes are emitted into a single `nodes[]` array — no nesting. Node IDs use `Target::Object::Member(label:)` namespace. `SchemaValidator` enforces that no node contains banned fields. Stored properties are excluded. `prism-context.json` is deleted on every build via `npm run clean`.
 
 ## Design System
 
@@ -105,9 +108,12 @@ spawn binary
 | Shape | Condition | Example |
 |---|---|---|
 | Sphere | Instance members | `func doWork()` |
-| Box | `isStatic: true` | `static func shared()` |
+| Box | Static members | `static func shared()` |
 | Diamond | `computed` property | `var count: Int { get }` |
 | Mini-sphere | `willSet`/`didSet` | `didSet { refresh() }` |
+| Star | `GLOBAL::MAIN` entry point | `@main struct MyApp` |
+
+Entry point nodes (`GLOBAL::MAIN`) represent the `@main` attribute or top-level code that serves as the application entry point for executable targets.
 
 ### Colors
 

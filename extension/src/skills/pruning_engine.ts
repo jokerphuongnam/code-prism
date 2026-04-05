@@ -1,22 +1,13 @@
 import type {
-  PrismNode,
-  PrismLink,
-  AnalysisResult,
+  FlatGraphNode,
+  FlatGraphResult,
   SymbolFlavor,
-  LinkType,
 } from "../protocol";
 import type * as vscode from "vscode";
 
 interface ExecutionChainResult {
   executionChain: string[];
   visitedFiles: Set<string>;
-}
-
-interface PruningSymbol {
-  id: string;
-  name: string;
-  flavor: SymbolFlavor;
-  status: "required" | "redundant";
 }
 
 interface PruningManifest {
@@ -33,32 +24,18 @@ interface NodeSummary {
   impactScore: "high" | "low";
 }
 
-type NodeIndex = Map<string, PrismNode>;
-type LinkIndex = Map<string, PrismLink[]>;
-type FileNodeIndex = Map<string, PrismNode[]>;
+type NodeIndex = Map<string, FlatGraphNode>;
+type ChildIndex = Map<string, FlatGraphNode[]>;
 
-const ENVIRONMENT_LINK_TYPES: ReadonlySet<LinkType> = new Set([
-  "environment_injection",
-  "environment_provider",
+const OBJECT_FLAVORS: ReadonlySet<SymbolFlavor> = new Set([
+  "struct", "class", "enum", "actor", "protocol",
 ]);
 
-const HIGH_IMPACT_SUBKINDS: ReadonlySet<string> = new Set([
-  "computed",
-  "willSet",
-  "didSet",
-  "getter",
-  "setter",
+const EXECUTABLE_FLAVORS: ReadonlySet<string> = new Set([
+  "function", "getter", "setter", "willSet", "didSet",
 ]);
 
-const CALLSITE_LINK_TYPES: ReadonlySet<LinkType> = new Set([
-  "call",
-  "access",
-  "observer_trigger",
-  "macro_expansion",
-  "extension_contribution",
-]);
-
-function buildNodeIndex(nodes: PrismNode[]): NodeIndex {
+function buildNodeIndex(nodes: FlatGraphNode[]): NodeIndex {
   const index: NodeIndex = new Map();
   for (const node of nodes) {
     index.set(node.id, node);
@@ -66,100 +43,57 @@ function buildNodeIndex(nodes: PrismNode[]): NodeIndex {
   return index;
 }
 
-function buildLinkIndex(links: PrismLink[]): LinkIndex {
-  const index: LinkIndex = new Map();
-  for (const link of links) {
-    const existing = index.get(link.source_id);
-    if (existing) {
-      existing.push(link);
-    } else {
-      index.set(link.source_id, [link]);
-    }
-  }
-  return index;
-}
-
-function buildFileNodeIndex(nodes: PrismNode[]): FileNodeIndex {
-  const index: FileNodeIndex = new Map();
+function buildChildIndex(nodes: FlatGraphNode[]): ChildIndex {
+  const index: ChildIndex = new Map();
   for (const node of nodes) {
-    const existing = index.get(node.sourceFile);
-    if (existing) {
-      existing.push(node);
-    } else {
-      index.set(node.sourceFile, [node]);
-    }
-  }
-  return index;
-}
-
-function resolveEnvironmentProviders(
-  targetTypeName: string,
-  nodes: PrismNode[],
-  links: PrismLink[]
-): string[] {
-  const providerIds: string[] = [];
-  for (const link of links) {
-    if (!ENVIRONMENT_LINK_TYPES.has(link.type)) {
-      continue;
-    }
-    const sourceNode = nodes.find((n) => n.id === link.source_id);
-    if (sourceNode && sourceNode.name === targetTypeName) {
-      providerIds.push(link.target_id);
-    }
-    const targetNode = nodes.find((n) => n.id === link.target_id);
-    if (targetNode && targetNode.name === targetTypeName) {
-      providerIds.push(link.source_id);
-    }
-  }
-  return providerIds;
-}
-
-function classifyImpact(node: PrismNode): "high" | "low" {
-  if (node.subKind && HIGH_IMPACT_SUBKINDS.has(node.subKind)) {
-    return "high";
-  }
-  if (node.flavor === "function" || node.flavor === "initializer") {
-    return "high";
-  }
-  return "low";
-}
-
-function isVisibleSymbol(node: PrismNode): boolean {
-  if (!node.isInteresting) return false;
-  if (node.flavor === "variable" && node.subKind === "stored" && !node.isStatic) {
-    return false;
-  }
-  return true;
-}
-
-function extractImportedFrameworks(
-  fileNodes: PrismNode[],
-  allLinks: PrismLink[]
-): string[] {
-  const frameworks: Set<string> = new Set();
-  for (const node of fileNodes) {
-    const outgoing = allLinks.filter((l) => l.source_id === node.id);
-    for (const link of outgoing) {
-      if (link.type === "cross_target_dependency") {
-        frameworks.add(link.target_id);
+    for (const parentId of node.parents) {
+      const existing = index.get(parentId);
+      if (existing) {
+        existing.push(node);
+      } else {
+        index.set(parentId, [node]);
       }
     }
   }
-  return Array.from(frameworks);
+  return index;
+}
+
+function collectNodeFiles(node: FlatGraphNode): string[] {
+  if (node.locations && node.locations.length > 0) {
+    return node.locations.map((loc) => loc.absPath);
+  }
+  if (node.location.absPath) {
+    return [node.location.absPath];
+  }
+  return [];
+}
+
+function classifyImpact(node: FlatGraphNode): "high" | "low" {
+  if (node.calls.length > 0) return "high";
+  if (node.inits && node.inits.length > 0) return "high";
+  if (EXECUTABLE_FLAVORS.has(node.flavor)) return "high";
+  if (OBJECT_FLAVORS.has(node.flavor)) return "high";
+  return "low";
+}
+
+function isVisibleSymbol(node: FlatGraphNode): boolean {
+  if (OBJECT_FLAVORS.has(node.flavor)) return true;
+  if (EXECUTABLE_FLAVORS.has(node.flavor)) return node.calls.length > 0;
+  if (node.flavor === "variable") return true;
+  if (node.flavor === "macro") return true;
+  return false;
 }
 
 export class PruningEngineService {
   private readonly nodeIndex: NodeIndex;
-  private readonly linkIndex: LinkIndex;
-  private readonly fileNodeIndex: FileNodeIndex;
-  private readonly analysisResult: AnalysisResult;
+  private readonly childIndex: ChildIndex;
+  private readonly result: FlatGraphResult;
   private readonly webview: vscode.Webview | null;
 
-  constructor(analysisResult: AnalysisResult, webview?: vscode.Webview) {
-    this.analysisResult = analysisResult;
-    this.nodeIndex = buildNodeIndex(analysisResult.nodes);
-    this.linkIndex = buildLinkIndex(analysisResult.links);
-    this.fileNodeIndex = buildFileNodeIndex(analysisResult.nodes);
+  constructor(result: FlatGraphResult, webview?: vscode.Webview) {
+    this.result = result;
+    this.nodeIndex = buildNodeIndex(result.nodes);
+    this.childIndex = buildChildIndex(result.nodes);
     this.webview = webview ?? null;
   }
 
@@ -174,19 +108,21 @@ export class PruningEngineService {
   }
 
   getPruningManifest(targetFile: string): PruningManifest {
-    const fileNodes = this.fileNodeIndex.get(targetFile) ?? [];
+    const fileNodes = this.result.nodes.filter((n) => {
+      const files = collectNodeFiles(n);
+      return files.some((f) => f.endsWith(targetFile) || f === targetFile);
+    });
+
     if (fileNodes.length === 0) {
       return { requiredSymbols: [], prunedSymbols: [], activeFrameworks: [] };
     }
 
-    const rootNode = fileNodes.find(
-      (n) => n.flavor === "struct" || n.flavor === "class" || n.flavor === "enum"
-    );
+    const rootNode = fileNodes.find((n) => OBJECT_FLAVORS.has(n.flavor));
     if (!rootNode) {
       return {
         requiredSymbols: fileNodes.map((n) => n.id),
         prunedSymbols: [],
-        activeFrameworks: extractImportedFrameworks(fileNodes, this.analysisResult.links),
+        activeFrameworks: this.extractFrameworksFromCalls(fileNodes),
       };
     }
 
@@ -204,9 +140,9 @@ export class PruningEngineService {
       }
     }
 
-    const allFrameworks = extractImportedFrameworks(fileNodes, this.analysisResult.links);
+    const allFrameworks = this.extractFrameworksFromCalls(fileNodes);
     const activeFrameworks = allFrameworks.filter((framework) =>
-      this.hasRequiredSymbolFromFramework(framework, chainSet)
+      this.hasRequiredCallToTarget(framework, chainSet)
     );
 
     return { requiredSymbols, prunedSymbols, activeFrameworks };
@@ -242,70 +178,86 @@ export class PruningEngineService {
     visitedFiles: Set<string>,
     chain: string[]
   ): void {
-    if (visited.has(nodeId)) {
-      return;
-    }
+    if (visited.has(nodeId)) return;
     visited.add(nodeId);
     chain.push(nodeId);
 
     const node = this.nodeIndex.get(nodeId);
-    if (node) {
-      visitedFiles.add(node.sourceFile);
+    if (!node) return;
+
+    for (const file of collectNodeFiles(node)) {
+      visitedFiles.add(file);
     }
 
-    const outgoingLinks = this.linkIndex.get(nodeId) ?? [];
-
-    for (const link of outgoingLinks) {
-      if (CALLSITE_LINK_TYPES.has(link.type) || ENVIRONMENT_LINK_TYPES.has(link.type)) {
-        this.dfsTrace(link.target_id, visited, visitedFiles, chain);
-      }
-
-      if (ENVIRONMENT_LINK_TYPES.has(link.type)) {
-        const targetNode = this.nodeIndex.get(link.target_id);
-        if (targetNode) {
-          const providers = resolveEnvironmentProviders(
-            targetNode.name,
-            this.analysisResult.nodes,
-            this.analysisResult.links
-          );
-          for (const providerId of providers) {
-            this.dfsTrace(providerId, visited, visitedFiles, chain);
-          }
-        }
-      }
-    }
-
-    if (node && (node.flavor === "struct" || node.flavor === "class")) {
-      const members = this.analysisResult.nodes.filter(
-        (n) => n.parent === node.id
+    for (const call of node.calls) {
+      const isExternalTarget = this.result.targets.some(
+        (t) => t.isExternal && (call.target === t.name || call.target.startsWith(`${t.name}::`))
       );
-      for (const member of members) {
-        if (member.flavor === "initializer") {
-          this.dfsTrace(member.id, visited, visitedFiles, chain);
-        }
-        const memberLinks = this.linkIndex.get(member.id) ?? [];
-        for (const memberLink of memberLinks) {
-          if (CALLSITE_LINK_TYPES.has(memberLink.type)) {
-            this.dfsTrace(memberLink.target_id, visited, visitedFiles, chain);
-          }
-        }
+      if (isExternalTarget) {
+        visited.add(call.target);
+        chain.push(call.target);
+        continue;
+      }
+      this.dfsTrace(call.target, visited, visitedFiles, chain);
+    }
+
+    if (node.inits) {
+      for (const initTarget of node.inits) {
+        this.dfsTrace(initTarget, visited, visitedFiles, chain);
+      }
+    }
+
+    if (node.deinits) {
+      for (const deinitTarget of node.deinits) {
+        this.dfsTrace(deinitTarget, visited, visitedFiles, chain);
+      }
+    }
+
+    if (OBJECT_FLAVORS.has(node.flavor) || node.flavor === "variable") {
+      const children = this.childIndex.get(node.id) ?? [];
+      for (const child of children) {
+        this.dfsTrace(child.id, visited, visitedFiles, chain);
+      }
+    }
+
+    const typeRefs = [...(node.returnTypes ?? []), ...(node.parameterTypes ?? [])];
+    for (const typeName of typeRefs) {
+      const typeNode = this.result.nodes.find((n) => n.name === typeName && OBJECT_FLAVORS.has(n.flavor));
+      if (typeNode) {
+        this.dfsTrace(typeNode.id, visited, visitedFiles, chain);
       }
     }
   }
 
-  private hasRequiredSymbolFromFramework(
+  private extractFrameworksFromCalls(nodes: FlatGraphNode[]): string[] {
+    const frameworks = new Set<string>();
+    for (const node of nodes) {
+      for (const call of node.calls) {
+        const parts = call.target.split("::");
+        if (parts.length >= 2) {
+          const targetModule = parts[0];
+          const isExternal = this.result.targets.some(
+            (t) => t.name === targetModule && t.isExternal
+          );
+          if (isExternal) {
+            frameworks.add(targetModule);
+          }
+        }
+      }
+    }
+    return Array.from(frameworks);
+  }
+
+  private hasRequiredCallToTarget(
     framework: string,
     requiredSet: Set<string>
   ): boolean {
-    for (const link of this.analysisResult.links) {
-      if (link.type !== "cross_target_dependency") {
-        continue;
-      }
-      if (link.target_id !== framework) {
-        continue;
-      }
-      if (requiredSet.has(link.source_id)) {
-        return true;
+    for (const node of this.result.nodes) {
+      if (!requiredSet.has(node.id)) continue;
+      for (const call of node.calls) {
+        if (call.target.startsWith(`${framework}::`)) {
+          return true;
+        }
       }
     }
     return false;

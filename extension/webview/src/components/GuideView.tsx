@@ -55,7 +55,7 @@ function buildGuide(result: AnalysisResult): GuideSection[] {
 
   const directLinks = result.links.filter((l) => l.type === "resource_link");
   if (directLinks.length > 0) {
-    const connections: MentionedNode[] = directLinks.map((l) => {
+    const resourceLinks: MentionedNode[] = directLinks.map((l) => {
       const sourceName = result.nodes.find((n) => n.id === l.source_id)?.name ?? l.source_id;
       const targetName = result.resources.find((r) => r.id === l.target_id)?.name ?? l.target_id;
       return {
@@ -67,7 +67,7 @@ function buildGuide(result: AnalysisResult): GuideSection[] {
         relatedIds: [l.source_id, l.target_id],
       };
     });
-    sections.push({ title: "Resource Usage", mentions: connections });
+    sections.push({ title: "Resource Usage", mentions: resourceLinks });
   }
 
   const aliasLinks = result.links.filter((l) => l.type === "resource_alias");
