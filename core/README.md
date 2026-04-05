@@ -47,11 +47,11 @@ Phases: `scanning` → `resolving` → `encoding` → `complete`
 | Flavor | Detected |
 |---|---|
 | `struct`, `class`, `enum`, `actor`, `protocol` | Type declarations with inheritance clauses |
-| `function` | Free functions and methods, `isStatic` detection |
+| `function` | Free functions and methods |
 | `variable` | Stored/computed properties, `willSet`/`didSet` as sub-symbols |
 | `initializer` | `init` declarations |
 
-Each symbol records: `id`, `name`, `flavor`, `subKind`, `isStatic`, `access`, `parent`, `location` (file/line/column).
+Each symbol records: `id`, `name`, `flavor`, `parent`, `location` (file/line/column), `targetName`, `signature`.
 
 **Pass 2 — Dependency Resolution** (`DependencyResolver.swift`)
 
@@ -69,6 +69,10 @@ Runs `CallCollector` on each symbol body + `InheritanceCollector` on type declar
 
 ## Output Schema (STDOUT)
 
+The binary outputs an intermediate `AnalysisResult` with `nodes[]`, `links[]`, `targets[]`. The extension's `analyzerBridge.ts` transforms this into the v4.0 flat-graph schema via `transformToFlat()` before forwarding to the webview. The intermediate format is never consumed by the UI directly.
+
+**Binary intermediate output (internal only):**
+
 ```json
 {
   "nodes": [
@@ -76,18 +80,21 @@ Runs `CallCollector` on each symbol body + `InheritanceCollector` on type declar
       "id": "MyStruct.compute",
       "name": "compute",
       "flavor": "function",
-      "subKind": null,
-      "isStatic": false,
-      "access": "internal",
       "parent": "MyStruct",
-      "location": { "file": "Sources/App.swift", "line": 12, "column": 5 }
+      "location": { "file": "Sources/App.swift", "line": 12, "column": 5 },
+      "targetName": "MyApp"
     }
   ],
   "links": [
     { "source_id": "MyStruct.compute", "target_id": "Helper.run", "type": "call" }
+  ],
+  "targets": [
+    { "name": "MyApp", "type": "executable", "path": "Sources/MyApp", "dependencies": [] }
   ]
 }
 ```
+
+**After transformation, IDs become `Target::File::Object::Member` (e.g., `MyApp::App.swift::MyStruct::compute`). Stored properties are excluded. See `UNIVERSAL_SCAN_LOGIC.md` section 7 for the final hierarchical schema.**
 
 ## Error Handling
 

@@ -6,13 +6,15 @@ SwiftPrism supports three project archetypes: SPM packages (single and multi-tar
 
 ### Auto-Detection Flow (`TargetResolver`)
 
+Target discovery is the **first step** in v3.1. All subsequent nodes (objects, functions, resources) are grouped under the target they belong to. The output is strictly hierarchical — flat node arrays are prohibited.
+
 ```
 Workspace Root
 ├── Package.swift exists?  → SPM Package mode
 │   ├── Parse Package.swift AST for .executableTarget / .target / .testTarget / .macro / .plugin
 │   ├── Resolve paths: custom `path:` or default Sources/<name>, Tests/<name>
 │   ├── Discover nested Package.swift files → local sub-packages
-│   └── Merge all targets
+│   └── Merge all targets → each target becomes a top-level container in the output
 ├── *.xcodeproj / *.xcworkspace exists?  → Xcode Project mode
 │   ├── Scan Sources/ subdirectories as targets
 │   └── Collect root-level .swift files as app target
@@ -39,7 +41,7 @@ For each target, the parser extracts:
 
 ### File-to-Target Mapping
 
-Every symbol gets a `targetName` field by checking which target's directory contains its source file. This enables cross-target dependency detection.
+Every symbol gets a `targetName` field by checking which target's directory contains its source file. Symbols are nested inside their owning target's `objects`, `freestandingFunctions`, or `resources` arrays — never in flat top-level arrays.
 
 ## 2. Swift Macro Intelligence
 
@@ -165,42 +167,105 @@ swift-prism-analyzer --workspace . --scan-targets --find-dependents-of "HomeView
 
 ## 6. Output Schema Extensions
 
-### AnalysisResult (v2)
+### AnalysisResult (v3.1-scope-stack)
+
+The output is **target-centric and hierarchical**. There are no top-level flat `nodes[]` or `links[]` arrays. Every object, function, and resource is nested inside its owning target. Node IDs follow the `Target::File::Object::Member` namespace pattern.
+
+Stored properties (`let x: Int`, `var name: String`) are **excluded** — they have no execution body and produce no nodes. Only executable blocks appear in the output.
 
 ```json
 {
-  "nodes": [...],
-  "links": [...],
-  "resources": [...],
+  "schemaVersion": "4.0-flat-graph",
+  "projectRoot": "/path/to/project",
   "targets": [
     {
       "name": "MyApp",
       "type": "executable",
-      "path": "/path/to/Sources/MyApp",
-      "dependencies": ["NetworkKit", "DesignSystem"]
+      "path": "Sources/MyApp",
+      "dependencies": ["NetworkKit"],
+      "isExternal": false,
+      "entryPoint": {
+        "id": "GLOBAL::MAIN",
+        "kind": "@main",
+        "location": { "line": 1, "col": 1, "absPath": "/path/MyApp.swift" },
+        "parents": ["MyApp"],
+        "calls": [{ "target": "MyApp::HomeViewModel", "location": {} }]
+      },
+      "resources": []
     }
   ],
-  "macros": [
+  "nodes": [
     {
-      "id": "AddInitMacro",
-      "name": "AddInitMacro",
-      "macroType": "attached",
-      "role": "member",
-      "conformances": ["MemberMacro"],
-      "generatedSymbols": ["MyModel", "UserProfile"],
-      "location": { "file": "...", "line": 5, "column": 1 },
-      "targetName": "MyMacros"
+      "id": "MyApp::HomeViewModel",
+      "name": "HomeViewModel",
+      "flavor": "class",
+      "location": { "line": 5, "col": 1, "absPath": "/path/HomeViewModel.swift" },
+      "parents": ["HomeViewModel.swift"],
+      "calls": [],
+      "locations": [
+        { "absPath": "/path/HomeViewModel.swift", "line": 5, "col": 1, "type": "primary" },
+        { "absPath": "/path/HomeViewModel+Net.swift", "line": 3, "col": 1, "type": "extension" }
+      ],
+      "sourceFiles": ["HomeViewModel.swift", "HomeViewModel+Net.swift"],
+      "extends": null,
+      "implements": ["SwiftUI::ObservableObject"],
+      "inits": ["MyApp::HomeViewModel::init()"],
+      "deinits": []
+    },
+    {
+      "id": "MyApp::HomeViewModel::init()",
+      "name": "init()",
+      "flavor": "initializer",
+      "location": { "line": 8, "col": 5, "absPath": "/path/HomeViewModel.swift" },
+      "parents": ["MyApp::HomeViewModel"],
+      "calls": [{ "target": "NetworkKit::HomeService", "location": {} }]
+    },
+    {
+      "id": "MyApp::HomeViewModel::loadData(id:)",
+      "name": "loadData(id:)",
+      "flavor": "function",
+      "location": { "line": 20, "col": 5, "absPath": "/path/HomeViewModel.swift" },
+      "parents": ["MyApp::HomeViewModel"],
+      "calls": [{ "target": "NetworkKit::HomeService::fetchData()", "location": {} }]
     }
   ]
 }
 ```
 
-### PrismContext (v2)
+External frameworks (SPM/CocoaPods) are represented as single target nodes with an `isExternal: true` flag. They produce no deep objects.
 
-The context skeleton now includes:
+### PrismContext (v3.1)
+
+The context skeleton is saved to `context.globalStorageUri/cache/`, never to the project root. It includes:
+
+- `schemaVersion`: `"3.1-scope-stack"`
 - `projectType`: `"swift_package"`, `"multi_target_package"`, `"swift_macro_package"`, `"swift_app"`, or `"standalone"`
-- `targets[]`: Per-target summary with file count and dependencies
+- `targets[]`: Per-target summary with file count, dependencies, and nested objects
 - `macroMap[]`: Macro name, type, role, and list of applied-to symbols
+
+## 7. v3.1 Architecture Rules
+
+The v3.1 "Scope-Stack & Execution-First" schema enforces five mandatory rules. Flat structures (`nodes[]`, `links[]`) are deprecated. Node IDs follow the `Target::File::Object::Member` namespace.
+
+### Rule 1: Target-Centricity
+
+Every node MUST belong to a Target. There are no orphan nodes at the top level. External frameworks (SPM dependencies, CocoaPods) are represented as single target nodes with a `from` attribute indicating the source URL or local path. If a file cannot be mapped to any target, it is placed under a synthetic `"unknown"` target.
+
+### Rule 2: Execution-Body Only
+
+Only nodes that have a code body receive a `calls` array. This includes: `func`, `init`, `deinit`, property accessors (`get`, `set`, `willSet`, `didSet`), and SwiftUI `var body`. Stored properties (e.g. `let x: Int`, `var name: String`) are **excluded entirely** — they produce NO nodes in the output. Property observers (`willSet`/`didSet`) are promoted as individual member nodes named `propertyName.willSet` / `propertyName.didSet`. This rule keeps the graph focused on executable code paths.
+
+### Rule 3: Object Schema
+
+Objects (Class, Struct, Enum, Actor) must use dedicated `inits: []` and `deinits: []` arrays instead of placing initializers and deinitializers in the generic `members` array. This makes constructor/destructor relationships explicit and queryable without filtering.
+
+### Rule 4: Ancestry
+
+Every node must track its full ancestry via `parents: [ID]`, a snapshot of the scope stack `[Target, File, Object, Member]`. For example, a method inside a class has `parents: ["MyApp", "HomeViewModel.swift", "HomeViewModel", "loadData"]`. The object itself gets `parents: ["MyApp", "HomeViewModel.swift"]` (without self). This enables upward traversal without requiring tree walks.
+
+### Rule 5: Source Mapping
+
+All internal executable nodes must include a `position: { line, col, absPath }` object. This provides mandatory source mapping for jump-to-definition, code navigation, and AI agent file retrieval. External target nodes are exempt from this requirement.
 
 ## Edge Cases
 

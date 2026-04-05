@@ -90,6 +90,8 @@ export interface PrismNode {
   location: SourceLocation;
   targetName: string | null;
   memberCount: number | null;
+  signature?: string | null;
+  isProtocolRequirement?: boolean;
 }
 
 export interface ResourceNode {
@@ -132,6 +134,7 @@ export interface PrismLink {
   type: LinkType;
   confidence: LinkConfidence | null;
   references: CallSiteRef[] | null;
+  targetSignature?: string | null;
 }
 
 export interface ModuleNode {
@@ -174,9 +177,16 @@ export interface ProgressInfo {
 export interface FlatMapEntry {
   id: string;
   name: string;
-  type: string;
-  location: { file: string; line: number; col: number };
-  connections: string[];
+  flavor: string;
+  location: { absPath: string; line: number; col: number };
+  parents: string[];
+  calls: string[];
+  locations?: { absPath: string; line: number; col: number; type: string }[];
+  sourceFiles?: string[];
+  inits?: string[];
+  deinits?: string[];
+  extends?: string | null;
+  implements?: string[];
 }
 
 export interface FilePreview {

@@ -39,6 +39,37 @@ struct Node: Encodable {
     let implementers: [String]?
     let superClass: String?
     let extensions: [String]?
+    let signature: String?
+    let isProtocolRequirement: Bool
+    let returnTypes: [String]?
+    let parameterTypes: [String]?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, flavor, location, targetName
+        case subKind, isStatic, isGlobal, isNested, isInteresting
+        case isProtocolRequirement, returnTypes, parameterTypes
+        case access, parent, parentFile, sourceFile, memberCount
+        case parents, implementers, superClass, extensions, signature
+    }
+
+    init(id: String, name: String, flavor: SymbolFlavor, subKind: SymbolSubKind?,
+         isStatic: Bool, isGlobal: Bool, isNested: Bool, isInteresting: Bool,
+         access: AccessLevel, parent: String?, parentFile: String?, sourceFile: String,
+         location: SourceLocation, targetName: String?, memberCount: Int?,
+         parents: [String]?, implementers: [String]?, superClass: String?,
+         extensions: [String]?, signature: String? = nil,
+         isProtocolRequirement: Bool = false,
+         returnTypes: [String]? = nil, parameterTypes: [String]? = nil) {
+        self.id = id; self.name = name; self.flavor = flavor; self.subKind = subKind
+        self.isStatic = isStatic; self.isGlobal = isGlobal; self.isNested = isNested
+        self.isInteresting = isInteresting; self.access = access; self.parent = parent
+        self.parentFile = parentFile; self.sourceFile = sourceFile; self.location = location
+        self.targetName = targetName; self.memberCount = memberCount; self.parents = parents
+        self.implementers = implementers; self.superClass = superClass
+        self.extensions = extensions; self.signature = signature
+        self.isProtocolRequirement = isProtocolRequirement
+        self.returnTypes = returnTypes; self.parameterTypes = parameterTypes
+    }
 }
 
 struct ResourceNode: Encodable {
@@ -55,6 +86,13 @@ struct TargetInfo: Encodable {
     let type: TargetType
     let path: String
     let dependencies: [String]
+    let isExternal: Bool
+    let remoteURL: String?
+
+    init(name: String, type: TargetType, path: String, dependencies: [String], isExternal: Bool = false, remoteURL: String? = nil) {
+        self.name = name; self.type = type; self.path = path
+        self.dependencies = dependencies; self.isExternal = isExternal; self.remoteURL = remoteURL
+    }
 }
 
 struct MacroNode: Encodable {
@@ -210,12 +248,17 @@ struct SymbolInfo {
     let parent: String?
     let location: SourceLocation
     var targetName: String?
+    let signature: String?
+    let isProtocolRequirement: Bool
+    let returnTypes: [String]?
+    let parameterTypes: [String]?
 }
 
 struct CallRef {
     let callee: String
     let isQualified: Bool
     let qualifier: String?
+    let callSignature: String?
     let line: Int
     let column: Int
     let snippet: String
@@ -246,6 +289,14 @@ struct ParsedTarget {
     let path: String
     let sourcePaths: [String]
     let dependencies: [String]
+    let isExternal: Bool
+    let remoteURL: String?
+
+    init(name: String, type: TargetType, path: String, sourcePaths: [String], dependencies: [String], isExternal: Bool = false, remoteURL: String? = nil) {
+        self.name = name; self.type = type; self.path = path
+        self.sourcePaths = sourcePaths; self.dependencies = dependencies
+        self.isExternal = isExternal; self.remoteURL = remoteURL
+    }
 }
 
 struct FullSummary: Encodable {
@@ -323,13 +374,74 @@ struct FocusEfficiency: Encodable {
 struct FlatMapEntry: Encodable {
     let id: String
     let name: String
-    let type: String
+    let flavor: String
     let location: FlatLocation
-    let connections: [String]
+    let parents: [String]
+    var calls: [String]?
+    var locations: [FlatObjectLocation]?
+    var sourceFiles: [String]?
+    var inits: [String]?
+    var deinits: [String]?
+    var `extends`: String?
+    var implements: [String]?
+    var returnTypes: [String]?
+    var parameterTypes: [String]?
+    var isProtocolRequirement: Bool = false
+
+    private static let objectFlavors: Set<String> = ["struct", "class", "enum", "actor", "protocol"]
+    private static let deinitFlavors: Set<String> = ["class", "actor"]
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, flavor, location, parents
+        case calls, locations, sourceFiles
+        case inits, deinits
+        case `extends`, implements
+        case returnTypes = "returns"
+        case parameterTypes = "parameters"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(flavor, forKey: .flavor)
+        try c.encode(location, forKey: .location)
+        try c.encode(parents, forKey: .parents)
+
+        let isObject = Self.objectFlavors.contains(flavor)
+
+        if isObject {
+            try c.encode(locations ?? [], forKey: .locations)
+            try c.encode(sourceFiles ?? [], forKey: .sourceFiles)
+            try c.encode(inits ?? [], forKey: .inits)
+            if Self.deinitFlavors.contains(flavor) {
+                try c.encode(deinits ?? [], forKey: .deinits)
+            }
+            try c.encodeIfPresent(`extends`, forKey: .extends)
+            try c.encode(implements ?? [], forKey: .implements)
+        } else {
+            if !isProtocolRequirement {
+                try c.encode(calls ?? [], forKey: .calls)
+            }
+            if let returns = returnTypes, !returns.isEmpty {
+                try c.encode(returns, forKey: .returnTypes)
+            }
+            if let params = parameterTypes, !params.isEmpty {
+                try c.encode(params, forKey: .parameterTypes)
+            }
+        }
+    }
 }
 
 struct FlatLocation: Encodable {
-    let file: String
+    let absPath: String
     let line: Int
     let col: Int
+}
+
+struct FlatObjectLocation: Encodable {
+    let absPath: String
+    let line: Int
+    let col: Int
+    let type: String
 }

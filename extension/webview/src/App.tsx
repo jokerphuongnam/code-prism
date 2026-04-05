@@ -21,24 +21,24 @@ function flatMapToAnalysisResult(entries: FlatMapEntry[]): AnalysisResult {
   const nodes = entries.map((e) => ({
     id: e.id,
     name: e.name,
-    flavor: e.type as AnalysisResult["nodes"][number]["flavor"],
+    flavor: e.flavor as AnalysisResult["nodes"][number]["flavor"],
     subKind: null,
     isStatic: false,
-    isGlobal: !e.id.includes("."),
+    isGlobal: e.parents.length === 0 || e.parents[0]?.endsWith(".swift"),
     isNested: false,
     isInteresting: true,
     access: "internal" as const,
-    parent: e.id.includes(".") ? e.id.split(".").slice(0, -1).join(".") : null,
-    parentFile: !e.id.includes(".") ? e.location.file.split("/").pop() ?? null : null,
-    sourceFile: e.location.file.split("/").pop() ?? e.location.file,
-    location: { file: e.location.file, line: e.location.line, column: e.location.col },
-    targetName: null,
+    parent: e.parents[0]?.includes("::") ? e.parents[0].split("::").pop() ?? null : null,
+    parentFile: e.parents[0]?.endsWith(".swift") ? e.parents[0] : null,
+    sourceFile: e.location.absPath.split("/").pop() ?? e.location.absPath,
+    location: { file: e.location.absPath, line: e.location.line, column: e.location.col },
+    targetName: e.id.split("::")[0] ?? null,
     memberCount: null,
   }));
 
   const nodeIds = new Set(entries.map((e) => e.id));
   const links = entries.flatMap((e) =>
-    e.connections
+    e.calls
       .filter((targetId) => nodeIds.has(targetId))
       .map((targetId) => ({
         source_id: e.id,

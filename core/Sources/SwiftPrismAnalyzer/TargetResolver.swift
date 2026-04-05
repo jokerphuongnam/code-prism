@@ -53,6 +53,10 @@ struct TargetResolver {
     }
 
     private func resolveXcodeProject() -> [ParsedTarget] {
+        if let pbxTargets = parseXcodeProj() {
+            return pbxTargets
+        }
+
         var targets: [ParsedTarget] = []
         let sourcesDir = (workspaceRoot as NSString).appendingPathComponent("Sources")
         let fm = FileManager.default
@@ -86,6 +90,103 @@ struct TargetResolver {
         }
 
         return targets
+    }
+
+    private func parseXcodeProj() -> [ParsedTarget]? {
+        let fm = FileManager.default
+        guard let projDir = findFirstMatch(extension: "xcodeproj") else { return nil }
+        let pbxPath = (workspaceRoot as NSString)
+            .appendingPathComponent(projDir)
+            .appending("/project.pbxproj")
+
+        guard let data = fm.contents(atPath: pbxPath),
+              let content = String(data: data, encoding: .utf8) else { return nil }
+
+        let targetPattern = try? NSRegularExpression(
+            pattern: #"/\* (.+?) \*/ = \{[^}]*isa = PBXNativeTarget;[^}]*productName = "?([^";]+)"?;[^}]*\}"#,
+            options: [.dotMatchesLineSeparators]
+        )
+        let fileRefPattern = try? NSRegularExpression(
+            pattern: #"[A-F0-9]+ /\* (.+?\.swift) \*/"#,
+            options: []
+        )
+
+        guard let targetRegex = targetPattern, let fileRegex = fileRefPattern else { return nil }
+
+        let targetSectionPattern = try? NSRegularExpression(
+            pattern: #"([A-F0-9]+) /\* (.+?) \*/ = \{\s*isa = PBXNativeTarget;\s*.*?buildPhases = \((.*?)\);\s*.*?name = "?([^";]+)"?;"#,
+            options: [.dotMatchesLineSeparators]
+        )
+
+        var targetNames: [String] = []
+        let simpleTargetPattern = try? NSRegularExpression(
+            pattern: #"name = "?([^";]+)"?;\s*[^}]*productType = "com\.apple\.\w+";"#,
+            options: [.dotMatchesLineSeparators]
+        )
+
+        if let regex = simpleTargetPattern {
+            let matches = regex.matches(in: content, range: NSRange(content.startIndex..., in: content))
+            for match in matches {
+                if let range = Range(match.range(at: 1), in: content) {
+                    targetNames.append(String(content[range]))
+                }
+            }
+        }
+
+        if targetNames.isEmpty {
+            targetNames = [inferProjectName()]
+        }
+
+        let allSwiftFiles = discoverSwiftFiles(in: workspaceRoot)
+
+        if targetNames.count == 1 {
+            let name = targetNames[0]
+            return [ParsedTarget(
+                name: name,
+                type: .executable,
+                path: workspaceRoot,
+                sourcePaths: allSwiftFiles,
+                dependencies: []
+            )]
+        }
+
+        var targets: [ParsedTarget] = []
+        for name in targetNames {
+            let targetDir = (workspaceRoot as NSString).appendingPathComponent(name)
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: targetDir, isDirectory: &isDir), isDir.boolValue {
+                targets.append(ParsedTarget(
+                    name: name,
+                    type: .library,
+                    path: targetDir,
+                    sourcePaths: discoverSwiftFiles(in: targetDir),
+                    dependencies: []
+                ))
+            }
+        }
+
+        let assignedFiles = Set(targets.flatMap(\.sourcePaths))
+        let unassigned = allSwiftFiles.filter { !assignedFiles.contains($0) }
+        if !unassigned.isEmpty {
+            let mainTarget = targetNames.first ?? inferProjectName()
+            if let idx = targets.firstIndex(where: { $0.name == mainTarget }) {
+                var t = targets[idx]
+                targets[idx] = ParsedTarget(
+                    name: t.name, type: .executable, path: t.path,
+                    sourcePaths: t.sourcePaths + unassigned, dependencies: t.dependencies
+                )
+            } else {
+                targets.append(ParsedTarget(
+                    name: mainTarget,
+                    type: .executable,
+                    path: workspaceRoot,
+                    sourcePaths: unassigned,
+                    dependencies: []
+                ))
+            }
+        }
+
+        return targets.isEmpty ? nil : targets
     }
 
     private func resolveStandaloneFiles() -> [ParsedTarget] {
@@ -155,8 +256,8 @@ struct TargetResolver {
         URL(fileURLWithPath: workspaceRoot).lastPathComponent
     }
 
-    private func isExternalDependency(_ target: ParsedTarget) -> Bool {
-        target.path.contains(".build/checkouts") || target.path.contains("SourcePackages")
+    func isExternalDependency(_ target: ParsedTarget) -> Bool {
+        target.isExternal || target.path.contains(".build/checkouts") || target.path.contains("SourcePackages") || target.path.contains("Pods/")
     }
 
     private func shouldSkip(_ path: String) -> Bool {
