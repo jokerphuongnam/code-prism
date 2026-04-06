@@ -43,6 +43,7 @@ interface GraphNode {
   isFileNode: boolean;
   isInteresting: boolean;
   isProtocolRequirement: boolean;
+  isTargetHub: boolean;
   hidden: boolean;
   parentId: string | null;
   parentFile: string | null;
@@ -50,6 +51,7 @@ interface GraphNode {
   sourceFile: string;
   memberCount: number | null;
   targetName: string | null;
+  origin: string | null;
   location: { file: string; line: number; column: number };
   x?: number;
   y?: number;
@@ -70,12 +72,27 @@ interface GraphLink {
   references?: CallSiteRef[] | null;
 }
 
-const TOP_LEVEL_FLAVORS = new Set(["struct", "class", "enum", "actor", "protocol"]);
+const TOP_LEVEL_FLAVORS = new Set(["struct", "class", "enum", "actor", "protocol", "target"]);
 const COLLAPSE_THRESHOLD = 150;
 const GLOBAL_COLOR = "#90A4AE";
 const FILE_NODE_COLOR = "#546E7A";
 const FILE_LINK_COLOR = "rgba(144,164,174,0.25)";
 const ORBIT_RADIUS = 25;
+
+// Target hub colors by origin category
+const TARGET_COLOR_APPLE = "#42A5F5";     // Blue — Apple SDK
+const TARGET_COLOR_REMOTE = "#FF9800";    // Orange — Remote Git
+const TARGET_COLOR_LOCAL = "#66BB6A";     // Green — Local External
+const TARGET_COLOR_INTERNAL = "#80DEEA";  // Cyan — Internal project target
+const ENTRY_POINT_COLOR = "#FFD700";      // Gold — GLOBAL::MAIN
+
+function targetColorByOrigin(origin: string | null): string {
+  if (!origin) return TARGET_COLOR_INTERNAL;
+  if (origin === "Apple") return TARGET_COLOR_APPLE;
+  if (origin.startsWith("http://") || origin.startsWith("https://") || origin.endsWith(".git")) return TARGET_COLOR_REMOTE;
+  if (origin.startsWith("/")) return TARGET_COLOR_LOCAL;
+  return TARGET_COLOR_INTERNAL;
+}
 
 const LINK_TYPE_LABELS: Record<LinkType, string> = {
   call: "Calls",
@@ -92,8 +109,9 @@ const LINK_TYPE_LABELS: Record<LinkType, string> = {
   nesting: "Nesting",
   environment_injection: "Env Injection",
   environment_provider: "Env Provider",
-  holds_type: "Holds",
+  holds_type: "Stores",
   enum_usage: "Uses Enum",
+  import_dependency: "Imports",
 };
 
 const SHAPE_GLYPHS: Record<NodeShape, string> = {
@@ -190,6 +208,7 @@ function buildFullNodeList(
       isMacroModule: false,
       isGlobal: false,
       isFileNode: true, isInteresting: true, isProtocolRequirement: false,
+      isTargetHub: false,
       hidden: false,
       parentId: null,
       parentFile: null,
@@ -197,14 +216,22 @@ function buildFullNodeList(
       sourceFile: fileName,
       memberCount: fileGlobalCounts.get(fileName) ?? 0,
       targetName: sampleNode?.targetName ?? null,
+      origin: null,
       location: { file: sampleNode?.location.file ?? "", line: 1, column: 1 },
     });
   }
 
   for (const n of result.nodes) {
-    const isModule = moduleIds.has(n.id);
+    // Execution-First: stored properties never become graph nodes
+    if (n.flavor === "variable" && (n.subKind === "stored" || n.subKind === null)) continue;
+
+    const isTarget = n.flavor === "target";
+    const isModule = !isTarget && moduleIds.has(n.id);
     const moduleInfo = isModule ? (result.moduleNodes ?? []).find((m) => m.id === n.id) : null;
     const fileNodeId = n.isGlobal && n.parentFile ? `file:${n.parentFile}` : null;
+
+    const isEntryPoint = n.flavor === "entry_point";
+    const targetOrigin = isTarget ? (n.origin ?? null) : null;
 
     nodes.push({
       id: n.id,
@@ -212,22 +239,28 @@ function buildFullNodeList(
       flavor: isModule ? "module" : n.flavor,
       subKind: n.subKind,
       isStatic: n.isStatic,
-      color: n.isGlobal ? GLOBAL_COLOR : isModule ? (MODULE_COLORS[moduleInfo?.moduleType ?? "library"] ?? MODULE_COLORS.library) : nodeColor(n.flavor, n.subKind),
-      shape: n.isGlobal ? "mini-sphere" : isModule ? "large-box" : nodeShape(n.flavor, n.subKind, n.isStatic),
-      size: n.isGlobal ? 2.5 : isModule ? 15 : nodeSize(n.flavor, n.subKind),
+      color: isTarget ? targetColorByOrigin(targetOrigin)
+        : isEntryPoint ? ENTRY_POINT_COLOR
+        : n.isGlobal ? GLOBAL_COLOR
+        : isModule ? (MODULE_COLORS[moduleInfo?.moduleType ?? "library"] ?? MODULE_COLORS.library)
+        : nodeColor(n.flavor, n.subKind),
+      shape: isTarget ? "large-box" : n.isGlobal ? "mini-sphere" : isModule ? "large-box" : nodeShape(n.flavor, n.subKind, n.isStatic),
+      size: isTarget ? nodeSize("target", null) : isEntryPoint ? 14 : n.isGlobal ? 2.5 : isModule ? 15 : nodeSize(n.flavor, n.subKind),
       isHighlighted: highlightedIds.has(n.id) || highlightedIds.has(n.name),
-      isTopLevel: isModule || (!n.isGlobal && TOP_LEVEL_FLAVORS.has(n.flavor)),
-      isModule,
+      isTopLevel: isTarget || isEntryPoint || isModule || (!n.isGlobal && TOP_LEVEL_FLAVORS.has(n.flavor)),
+      isModule: isModule || isTarget,
       isMacroModule: moduleInfo?.isMacro ?? false,
       isGlobal: n.isGlobal,
-      isFileNode: false, isInteresting: n.isInteresting, isProtocolRequirement: n.isProtocolRequirement ?? false,
+      isFileNode: false, isInteresting: true, isProtocolRequirement: n.isProtocolRequirement ?? false,
+      isTargetHub: isTarget,
       hidden: false,
-      parentId: n.parent,
-      parentFile: n.parentFile ?? null,
-      fileNodeId,
+      parentId: isTarget ? null : n.parent,
+      parentFile: isTarget ? null : (n.parentFile ?? null),
+      fileNodeId: isTarget ? null : fileNodeId,
       sourceFile: n.sourceFile,
       memberCount: n.memberCount ?? null,
-      targetName: n.targetName ?? null,
+      targetName: isTarget ? n.id : (n.targetName ?? null),
+      origin: targetOrigin,
       location: n.location,
     });
   }
@@ -251,13 +284,15 @@ function buildFullNodeList(
         isMacroModule: false,
         isGlobal: false,
         isFileNode: false, isInteresting: true, isProtocolRequirement: false,
-      hidden: false,
+        isTargetHub: false,
+        hidden: false,
         parentId: r.parentGroup,
         parentFile: null,
         fileNodeId: r.parentGroup,
         sourceFile: r.filePath,
         memberCount: null,
         targetName: null,
+        origin: null,
         location: { file: r.filePath, line: 1, column: 1 },
       });
     }
@@ -275,7 +310,8 @@ function computeVisibility(
   const visible = new Set<string>();
   if (!collapsed) {
     for (const n of allNodes) {
-      if (n.flavor === "variable" && !n.isHighlighted && !n.isInteresting) continue;
+      // Defense-in-depth: skip any stored variables that leaked through
+      if (n.flavor === "variable" && (n.subKind === "stored" || n.subKind === null)) continue;
       visible.add(n.id);
     }
     return visible;
@@ -570,11 +606,32 @@ function createSpriteTexture(n: GraphNode, lod: "full" | "dot"): THREE.SpriteMat
 function createNodeSprite(n: GraphNode): THREE.Group {
   const group = new THREE.Group();
 
-  const material = createSpriteTexture(n, n.isGlobal ? "dot" : "full");
+  // Target hubs and entry points always render full, not dots
+  const useDot = n.isGlobal && !n.isTargetHub && n.flavor !== "entry_point";
+  const material = createSpriteTexture(n, useDot ? "dot" : "full");
   const sprite = new THREE.Sprite(material);
-  const scale = n.isGlobal ? n.size * 1.2 : n.size * 1.8;
+  const scale = useDot ? n.size * 1.2 : n.size * 1.8;
   sprite.scale.set(scale, scale, 1);
   group.add(sprite);
+
+  // Entry point: add a subtle glow ring
+  if (n.flavor === "entry_point") {
+    const glowCanvas = document.createElement("canvas");
+    glowCanvas.width = 64;
+    glowCanvas.height = 64;
+    const gctx = glowCanvas.getContext("2d")!;
+    const gradient = gctx.createRadialGradient(32, 32, 8, 32, 32, 30);
+    gradient.addColorStop(0, "rgba(255, 215, 0, 0.5)");
+    gradient.addColorStop(1, "rgba(255, 215, 0, 0)");
+    gctx.fillStyle = gradient;
+    gctx.fillRect(0, 0, 64, 64);
+    const glowTex = new THREE.CanvasTexture(glowCanvas);
+    glowTex.minFilter = THREE.LinearFilter;
+    const glowMat = new THREE.SpriteMaterial({ map: glowTex, transparent: true, depthWrite: false, sizeAttenuation: true });
+    const glowSprite = new THREE.Sprite(glowMat);
+    glowSprite.scale.set(scale * 2.5, scale * 2.5, 1);
+    group.add(glowSprite);
+  }
 
   const hitRadius = Math.max(scale * 1.5, 6);
   const hitGeo = new THREE.SphereGeometry(hitRadius, 6, 4);
@@ -583,7 +640,7 @@ function createNodeSprite(n: GraphNode): THREE.Group {
   group.add(hitMesh);
 
   group.userData = {
-    currentLod: n.isGlobal ? "dot" : "full",
+    currentLod: useDot ? "dot" : "full",
     baseScale: scale,
     sprite,
   };
@@ -694,6 +751,8 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
     isStatic: boolean; isGlobal: boolean; isModule: boolean;
     parentId: string | null; sourceFile: string; memberCount: number | null; color: string;
     targetName: string | null;
+    locations?: { file: string; line: number; column: number }[];
+    origin?: string;
   } | null>(null);
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -753,7 +812,11 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
 
   const graphData = useMemo(() => {
     if (!result) return { nodes: [] as GraphNode[], links: [] as GraphLink[] };
-    return buildFullGraphData(allNodes, result, visibleLinkTypes, visibleNodeIds, showStructural);
+    // Safety net: exclude any stored variables that survived earlier filters
+    const execNodes = allNodes.filter((n) =>
+      n.flavor !== "variable" || (n.subKind !== null && n.subKind !== "stored")
+    );
+    return buildFullGraphData(execNodes, result, visibleLinkTypes, visibleNodeIds, showStructural);
   }, [allNodes, result, visibleLinkTypes, visibleNodeIds, showStructural]);
 
 
@@ -789,6 +852,13 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
 
       if (n.isFileNode) {
         setSelectedNode(n);
+        return;
+      }
+
+      // Target hubs: fly-to and show detail (no member expansion)
+      if (n.isTargetHub) {
+        setSelectedNode(n);
+        flyToNode(n);
         return;
       }
 
@@ -914,12 +984,15 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
         setHoverPos({ x: screen.x, y: screen.y });
         setHoveredNodeId(n.id);
         setCardPinned(true);
+        const prismNode = result?.nodes.find((pn) => pn.id === n.id);
         setHoveredNodeInfo({
           id: n.id, name: n.name, flavor: n.flavor, subKind: n.subKind,
           isStatic: n.isStatic, isGlobal: n.isGlobal, isModule: n.isModule,
           parentId: n.parentId, sourceFile: n.sourceFile,
           memberCount: n.memberCount, color: n.color,
           targetName: n.targetName,
+          locations: prismNode?.locations,
+          origin: prismNode?.origin,
         });
         hoverTimerRef.current = setTimeout(() => {
           if (n.location.file && onRequestFilePreview) {
@@ -1014,6 +1087,7 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
     graph.d3Force("charge")?.strength((node: unknown) => {
       const n = node as GraphNode;
       if (n.hidden) return 0;
+      if (n.flavor === "target") return sim.chargeStrength * 3;  // strong repulsion between hubs
       if (n.isGlobal) return sim.chargeStrength * 0.15;
       if (n.isFileNode) return sim.chargeStrength * 0.5;
       if (n.flavor === "resource" && n.parentId) return sim.chargeStrength * 0.2;
@@ -1022,6 +1096,7 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
 
     graph.d3Force("link")?.distance((link: unknown) => {
       const l = link as GraphLink;
+      if (l.linkType === "import_dependency") return sim.linkDistance * 2.5;  // target-to-target: wide orbit
       if (l.linkType === "file_containment") return ORBIT_RADIUS;
       if (l.linkType === "nesting") return ORBIT_RADIUS * 0.8;
       if (l.linkType === "resource_containment") return ORBIT_RADIUS * 0.7;
@@ -1043,6 +1118,7 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
 
       graph.d3Force("radial", d3.forceRadial((node: unknown) => {
         const n = node as GraphNode;
+        if (n.flavor === "target") return 0;     // hubs at center
         if (n.isModule) return 20;
         if (TOP_LEVEL_FLAVORS.has(n.flavor as string)) return 80;
         if (n.flavor === "resource") return 200;
@@ -1051,6 +1127,7 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
       }, 0, 0, 0).strength((node: unknown) => {
         const n = node as GraphNode;
         if (n.hidden) return 0;
+        if (n.flavor === "target") return 0.12;   // strong pull to center
         if (n.isModule) return 0.08;
         if (TOP_LEVEL_FLAVORS.has(n.flavor as string)) return 0.03;
         if (n.flavor === "resource") return 0.05;
@@ -1124,6 +1201,9 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
         const dz = camPos.z - nz;
         const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
+        // Target hubs and entry points always stay full — skip global LOD
+        if (node.isTargetHub || node.flavor === "entry_point") continue;
+
         if (node.isGlobal) {
           const wantLod = dist < LOD_NEAR * 0.6 ? "full" : "dot";
           if (wantLod !== group.userData.currentLod) {
@@ -1169,6 +1249,24 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
     return graph;
   }, [handleNodeClick, onClearPreview, onRequestFilePreview, resetCamera]);
 
+  // Reset graph instance when result identity changes (null→data or data→new data)
+  const resultGeneration = useRef(0);
+  useEffect(() => {
+    resultGeneration.current++;
+    initialLoadDone.current = false;
+
+    // Tear down existing graph on data change
+    if (graphRef.current && containerRef.current) {
+      graphRef.current.pauseAnimation();
+      graphRef.current._destructor?.();
+      graphRef.current = null;
+      // Clear the DOM — force-graph appends canvas elements
+      while (containerRef.current.firstChild) {
+        containerRef.current.removeChild(containerRef.current.firstChild);
+      }
+    }
+  }, [result]);
+
   useEffect(() => {
     if (!graphRef.current) {
       const graph = initGraph();
@@ -1182,7 +1280,7 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
     const observer = new ResizeObserver(handleResize);
     if (containerRef.current) observer.observe(containerRef.current);
     return () => { observer.disconnect(); cancelAnimationFrame(animFrameRef.current); };
-  }, [initGraph]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [initGraph, graphData]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!graphRef.current) return;
@@ -1352,6 +1450,7 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
             }
           }, 100);
         }}
+        onOpenFile={onOpenFile}
       />
 
       <FilterPanel linkTypes={presentLinkTypes} visibleLinkTypes={visibleLinkTypes} onToggle={handleToggleLink}

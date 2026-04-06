@@ -24,6 +24,10 @@ export interface HoveredNodeInfo {
   memberCount: number | null;
   color: string;
   targetName?: string | null;
+  /** Object-only: extension block locations for "Defined In" */
+  locations?: { file: string; line: number; column: number }[];
+  /** Target-only: origin path/URL */
+  origin?: string;
 }
 
 interface NodeDetailCardProps {
@@ -36,6 +40,7 @@ interface NodeDetailCardProps {
   pinned: boolean;
   onMouseEnterCard: () => void;
   onMouseLeaveCard: () => void;
+  onOpenFile?: (location: { file: string; line: number; col: number }) => void;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -56,6 +61,7 @@ const FLAVOR_ICONS: Record<string, string> = {
   module: "\u{1F4E6}",
   file: "\u{1F4C4}",
   entry_point: "\u2606",
+  target: "\u{1F3AF}",
 };
 
 const FLAVOR_LABELS: Record<string, string> = {
@@ -72,6 +78,7 @@ const FLAVOR_LABELS: Record<string, string> = {
   module: "Module",
   file: "File",
   entry_point: "Entry Point",
+  target: "Target",
   image_set: "Image Asset",
   color_set: "Color Asset",
   data_set: "Data Asset",
@@ -94,6 +101,11 @@ const FLAVOR_COLORS: Record<string, string> = {
   initializer: "#AB47BC",
   macro: "#FF7043",
   entry_point: "#FFD700",
+  target: "#42A5F5",
+  target_apple: "#42A5F5",
+  target_remote: "#FF9800",
+  target_local: "#66BB6A",
+  target_internal: "#80DEEA",
   resource: "#29B6F6",
   module: "#5C6BC0",
   file: "#546E7A",
@@ -125,6 +137,7 @@ interface InspectorData {
   staticMethods: string[];
   instanceMethods: string[];
   observers: { kind: string; property: string }[];
+  stores: string[];
   directCalls: string[];
   referencedBy: string[];
   containsSymbols: string[];
@@ -144,6 +157,7 @@ function buildInspectorData(
     staticMethods: [],
     instanceMethods: [],
     observers: [],
+    stores: [],
     directCalls: [],
     referencedBy: [],
     containsSymbols: [],
@@ -187,6 +201,7 @@ function buildInspectorData(
         }
       }
       if (link.type === "conformance") data.implements_.push(targetName);
+      if (link.type === "holds_type") data.stores.push(targetName);
     }
 
     // Members
@@ -318,6 +333,7 @@ export function NodeDetailCard({
   pinned,
   onMouseEnterCard,
   onMouseLeaveCard,
+  onOpenFile,
 }: NodeDetailCardProps) {
   if (!position) return null;
 
@@ -344,6 +360,7 @@ export function NodeDetailCard({
 
   const inspector = node ? buildInspectorData(node, result) : null;
   const isObject = node ? OBJECT_FLAVORS.has(node.flavor) : false;
+  const isTarget = node?.flavor === "target";
   const isExec = node ? (EXEC_FLAVORS.has(node.flavor) || (node.flavor === "variable" && node.subKind && node.subKind !== "stored")) : false;
   const isFile = node?.flavor === "file";
   const isResource = node ? (node.flavor === "resource" || ["image_set", "color_set", "data_set", "json_file", "plist_file", "markdown_file"].includes(node.flavor)) : false;
@@ -417,6 +434,26 @@ export function NodeDetailCard({
                 <InfoRow label="Accessor for" value={inspector.accessorFor} color="#E040FB" />
               )}
 
+              {/* Target Hub Inspector */}
+              {isTarget && (() => {
+                const origin = node.origin;
+                let category: string;
+                let color: string;
+                if (!origin) { category = "Internal Target"; color = "#80DEEA"; }
+                else if (origin === "Apple") { category = "Apple SDK"; color = "#42A5F5"; }
+                else if (origin.startsWith("http") || origin.endsWith(".git")) { category = "Remote Dependency"; color = "#FF9800"; }
+                else if (origin.startsWith("/")) { category = "Local Dependency"; color = "#66BB6A"; }
+                else { category = "External"; color = "#EF5350"; }
+                return (
+                  <>
+                    <InfoRow label="Category" value={category} color={color} />
+                    {origin && origin !== "Apple" && (
+                      <InfoRow label="Origin" value={origin} color="rgba(255,255,255,0.6)" />
+                    )}
+                  </>
+                );
+              })()}
+
               {/* Object Inspector */}
               {isObject && inspector && (
                 <>
@@ -446,7 +483,34 @@ export function NodeDetailCard({
                   <TagList items={inspector.staticMethods} color="#42A5F5" label="Static" />
                   <TagList items={inspector.instanceMethods} color="#90CAF9" label="Methods" />
                   <ObserverList observers={inspector.observers} />
+                  <TagList items={inspector.stores} color="#B0BEC5" label="Internal Storage" />
                 </>
+              )}
+
+              {/* Defined In — extension locations for click-to-code navigation */}
+              {isObject && node.locations && node.locations.length > 0 && (
+                <div style={sectionStyles.row}>
+                  <span style={sectionStyles.label}>Extensions</span>
+                  <div style={sectionStyles.tagWrap}>
+                    {node.locations.map((loc, i) => {
+                      const fileName = loc.file.split("/").pop() ?? loc.file;
+                      return (
+                        <span
+                          key={`loc-${i}`}
+                          style={{
+                            ...sectionStyles.tag,
+                            borderColor: "#42A5F5",
+                            color: "#42A5F5",
+                            cursor: onOpenFile ? "pointer" : "default",
+                          }}
+                          onClick={() => onOpenFile?.({ file: loc.file, line: loc.line, col: loc.column })}
+                        >
+                          {fileName}:{loc.line}
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
               )}
 
               {/* Executable Body Inspector */}

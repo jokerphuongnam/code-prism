@@ -146,6 +146,7 @@ enum SymbolFlavor: String, Encodable {
     case initializer
     case macro
     case entryPoint = "entry_point"
+    case target
 }
 
 enum SymbolSubKind: String, Encodable {
@@ -183,6 +184,7 @@ enum LinkType: String, Encodable {
     case environmentProvider = "environment_provider"
     case holdsType = "holds_type"
     case enumUsage = "enum_usage"
+    case importDependency = "import_dependency"
 }
 
 enum LinkConfidence: String, Encodable {
@@ -378,26 +380,28 @@ struct FlatMapEntry: Encodable {
     let location: FlatLocation
     let parents: [String]
     var calls: [String]?
-    var locations: [FlatObjectLocation]?
-    var sourceFiles: [String]?
+    var locations: [FlatLocation]?
     var inits: [String]?
     var deinits: [String]?
     var `extends`: String?
     var implements: [String]?
     var returnTypes: [String]?
     var parameterTypes: [String]?
+    var stores: [String]?
     var isProtocolRequirement: Bool = false
+    var origin: String?
 
     private static let objectFlavors: Set<String> = ["struct", "class", "enum", "actor", "protocol"]
     private static let deinitFlavors: Set<String> = ["class", "actor"]
 
     enum CodingKeys: String, CodingKey {
         case id, name, flavor, location, parents
-        case calls, locations, sourceFiles
+        case calls, locations
         case inits, deinits
-        case `extends`, implements
+        case `extends`, implements, stores
         case returnTypes = "returns"
         case parameterTypes = "parameters"
+        case origin
     }
 
     func encode(to encoder: Encoder) throws {
@@ -409,16 +413,26 @@ struct FlatMapEntry: Encodable {
         try c.encode(parents, forKey: .parents)
 
         let isObject = Self.objectFlavors.contains(flavor)
+        let isTarget = flavor == "target"
 
-        if isObject {
-            try c.encode(locations ?? [], forKey: .locations)
-            try c.encode(sourceFiles ?? [], forKey: .sourceFiles)
+        if isTarget {
+            try c.encodeIfPresent(origin, forKey: .origin)
+            if let calls, !calls.isEmpty {
+                try c.encode(calls, forKey: .calls)
+            }
+        } else if isObject {
+            if let locs = locations, !locs.isEmpty {
+                try c.encode(locs, forKey: .locations)
+            }
             try c.encode(inits ?? [], forKey: .inits)
             if Self.deinitFlavors.contains(flavor) {
                 try c.encode(deinits ?? [], forKey: .deinits)
             }
             try c.encodeIfPresent(`extends`, forKey: .extends)
             try c.encode(implements ?? [], forKey: .implements)
+            if let stores, !stores.isEmpty {
+                try c.encode(stores, forKey: .stores)
+            }
         } else {
             if !isProtocolRequirement {
                 try c.encode(calls ?? [], forKey: .calls)
@@ -439,9 +453,3 @@ struct FlatLocation: Encodable {
     let col: Int
 }
 
-struct FlatObjectLocation: Encodable {
-    let absPath: String
-    let line: Int
-    let col: Int
-    let type: String
-}

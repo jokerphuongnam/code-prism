@@ -8,7 +8,8 @@ export type SymbolFlavor =
   | "variable"
   | "initializer"
   | "macro"
-  | "entry_point";
+  | "entry_point"
+  | "target";
 
 export type SymbolSubKind =
   | "willSet"
@@ -42,7 +43,8 @@ export type LinkType =
   | "environment_injection"
   | "environment_provider"
   | "holds_type"
-  | "enum_usage";
+  | "enum_usage"
+  | "import_dependency";
 
 export type LinkConfidence = "high" | "medium" | "low";
 
@@ -224,14 +226,14 @@ export interface FlatGraphNode {
   parents: string[];
   calls: CallRef[];
 
-  /** Object-only: all locations where this type is declared or extended, with "primary"/"extension" type */
-  locations?: ObjectLocation[];
-  /** Object-only: files where defined/extended */
-  sourceFiles?: string[];
+  /** Object-only: extension block locations for "Defined In" navigation */
+  locations?: SourcePosition[];
   /** Object-only: superclass ID (null if none) */
   extends?: string | null;
   /** Object-only: protocol conformance IDs */
   implements?: string[];
+  /** Object-only: stored property type dependencies (non-native custom types/targets) */
+  stores?: string[];
   /** Object-only: fast-track init IDs (strings, not full objects) */
   inits?: string[];
   /** Object-only: fast-track deinit IDs (strings, not full objects) */
@@ -239,6 +241,8 @@ export interface FlatGraphNode {
   isProtocolRequirement?: boolean;
   returnTypes?: string[];
   parameterTypes?: string[];
+  /** Target-only: origin path/URL (e.g. "Apple SDK", Git URL, or absolute path) */
+  origin?: string;
 }
 
 export interface EntryPointNode {

@@ -5,6 +5,8 @@ final class SymbolCollector: SyntaxVisitor {
 
     private(set) var symbols: [SymbolInfo] = []
     private(set) var fileImports: [String] = []
+    /// Maps extended type name → [(file, line, col)] for extension block locations
+    private(set) var extensionLocations: [String: [SourceLocation]] = [:]
     private var containerStack: [String] = []
     private let filePath: String
     private let fileName: String
@@ -118,8 +120,11 @@ final class SymbolCollector: SyntaxVisitor {
     }
 
     override func visit(_ node: ExtensionDeclSyntax) -> SyntaxVisitorContinueKind {
-        containerStack.append(node.extendedType.trimmedDescription)
+        let typeName = node.extendedType.trimmedDescription
+        containerStack.append(typeName)
         insideExtension = true
+        let loc = sourceLocation(of: Syntax(node))
+        extensionLocations[typeName, default: []].append(loc)
         return .visitChildren
     }
     override func visitPost(_ node: ExtensionDeclSyntax) {

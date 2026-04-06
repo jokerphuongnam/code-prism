@@ -11,6 +11,7 @@ const FLAVOR_COLORS: Record<SymbolFlavor, string> = {
   initializer: "#AB47BC",
   macro: "#FF7043",
   entry_point: "#FFD700",
+  target: "#EF5350",
 };
 
 const SUBKIND_COLORS: Partial<Record<SymbolSubKind, string>> = {
@@ -100,6 +101,8 @@ export function nodeSize(flavor: SymbolFlavor, subKind: SymbolSubKind | null): n
       return 7;
     case "entry_point":
       return 14;
+    case "target":
+      return 16;
   }
 }
 
@@ -137,6 +140,7 @@ const LINK_COLORS: Record<LinkType, string> = {
   environment_provider: "#4DD0E1",
   holds_type: "#B0BEC5",
   enum_usage: "#FF8A65",
+  import_dependency: "#EF5350",
 };
 
 export function linkColor(type: LinkType): string {
