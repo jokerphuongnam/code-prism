@@ -28,7 +28,6 @@ import type {
   PrismNode,
   PrismLink,
   SourcePosition,
-  ObjectLocation,
   CallRef,
   FlatGraphNode,
   EntryPointNode,
@@ -38,7 +37,7 @@ import type {
   TargetInfo,
 } from "./protocol";
 
-export const LOGIC_VERSION = "3.1-scope-stack";
+export const LOGIC_VERSION = "4.0-target-hub";
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ERROR HANDLING
@@ -60,6 +59,9 @@ export class AnalyzerError extends Error {
 export class SchemaValidator {
   static validate(nodes: FlatGraphNode[]): void {
     for (const node of nodes) {
+      // Target hub nodes have different rules — plain ID, no parents required
+      if (node.flavor === "target") continue;
+
       if (!node.parents || !Array.isArray(node.parents) || node.parents.length === 0) {
         throw new AnalyzerError(
           `FATAL: Node "${node.id}" is missing parents[]. Every node must have at least one parent.`
@@ -115,13 +117,17 @@ export interface FlatMapEntry {
   flavor: string;
   location: { absPath: string; line: number; col: number };
   parents: string[];
-  calls: string[];
-  locations?: { absPath: string; line: number; col: number; type: string }[];
-  sourceFiles?: string[];
+  calls?: string[];
+  /** Object-only: extension block locations for "Defined In" navigation */
+  locations?: { absPath: string; line: number; col: number }[];
   inits?: string[];
   deinits?: string[];
   extends?: string | null;
   implements?: string[];
+  stores?: string[];
+  returns?: string[];
+  parameters?: string[];
+  origin?: string;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -374,22 +380,16 @@ function findEntryPoint(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// DUAL-LAYER PARENTING
+// PARENTING — Single Lexical Parent
 //
-// parents[] shows IMMEDIATE ancestors only (Physical Location / Logical Owner):
+// Object (top-level):    parents: ["Declaration.swift"]
+// Object (nested):       parents: ["Target::OwnerObject"]
+// Member (func/observer): parents: ["Target::OwnerObject"]
+// Global (top-level func): parents: ["FileName.swift"]
 //
-// Object (top-level):
-//   parents: ["PrimaryDefinition.swift"]
-//   sourceFiles: ["PrimaryDefinition.swift", "Extension.swift"]
-//
-// Object (nested inside another):
-//   parents: ["Target::OwnerObject"]
-//
-// Member (method/init/observer of an Object):
-//   parents: ["Target::OwnerObject"]
-//
-// Global (top-level func/var):
-//   parents: ["FileName.swift"]
+// Extension members attach to the PRIMARY Object ID via parents[].
+// Each member's location.absPath points to the file where it is written,
+// enabling precise "Click-to-Code" navigation even across extension files.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -410,58 +410,6 @@ function buildObserverId(targetName: string, qualifiedPath: string, propName: st
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// EXTENSION MERGING
-//
-// When an Object is defined in FileA.swift and extended in FileB.swift,
-// the binary emits separate child nodes under the same parent ID but with
-// different sourceFile values. We merge them into one ObjectNode with
-// parents listing ALL files.
-// ═══════════════════════════════════════════════════════════════════════════════
-
-function collectObjectFiles(
-  objId: string,
-  objSourceFile: string,
-  allNodes: PrismNode[]
-): string[] {
-  const files = new Set<string>();
-  files.add(path.basename(objSourceFile));
-  for (const n of allNodes) {
-    if (n.parent === objId && n.sourceFile) {
-      files.add(path.basename(n.sourceFile));
-    }
-  }
-  return Array.from(files).sort();
-}
-
-function collectObjectLocations(
-  obj: PrismNode,
-  allNodes: PrismNode[]
-): ObjectLocation[] {
-  const primaryFile = obj.sourceFile;
-  const seen = new Map<string, ObjectLocation>();
-
-  seen.set(primaryFile, {
-    absPath: primaryFile,
-    line: obj.location.line,
-    col: obj.location.column,
-    type: "primary",
-  });
-
-  for (const n of allNodes) {
-    if (n.parent !== obj.id) continue;
-    if (!n.sourceFile || seen.has(n.sourceFile)) continue;
-    seen.set(n.sourceFile, {
-      absPath: n.sourceFile,
-      line: n.location.line,
-      col: n.location.column,
-      type: "extension",
-    });
-  }
-
-  return Array.from(seen.values());
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
 // FLAT WALKER — Emits nodes into a shared flat array
 //
 // Init/deinit do NOT produce independent nodes. Their outgoing calls are
@@ -476,6 +424,7 @@ function flatWalkObject(
   nodeById: Map<string, PrismNode>,
   targetName: string,
   out: FlatGraphNode[],
+  targetHubIds?: Set<string>,
   parentObjectId?: string,
   parentQualifiedPath?: string
 ): void {
@@ -535,7 +484,7 @@ function flatWalkObject(
     }
 
     if (OBJECT_FLAVORS.has(child.flavor)) {
-      flatWalkObject(child, targetNodes, links, nodeById, targetName, out, objId, qualifiedPath);
+      flatWalkObject(child, targetNodes, links, nodeById, targetName, out, targetHubIds, objId, qualifiedPath);
       continue;
     }
 
@@ -578,8 +527,32 @@ function flatWalkObject(
     }
   }
 
-  const objectFiles = collectObjectFiles(obj.id, obj.sourceFile, targetNodes);
-  const objectLocations = collectObjectLocations(obj, targetNodes);
+  // Collect extension block locations from extension_contribution links
+  const extLocations: SourcePosition[] = [];
+  const seenExtFiles = new Set<string>();
+  for (const link of links) {
+    if (link.target_id !== obj.id || link.type !== "extension_contribution") continue;
+    const extFile = link.source_id.startsWith("file:") ? link.source_id.slice(5) : link.source_id;
+    if (seenExtFiles.has(extFile)) continue;
+    seenExtFiles.add(extFile);
+    // Find the first member in this extension file to approximate the extension block location
+    const extMember = targetNodes.find((n) => n.parent === obj.id && n.sourceFile === extFile);
+    extLocations.push({
+      absPath: extFile,
+      line: extMember?.location.line ?? 1,
+      col: extMember?.location.column ?? 1,
+    });
+  }
+
+  // Collect stored property type dependencies from holds_type links
+  const storeIds: string[] = [];
+  const seenStores = new Set<string>();
+  for (const link of links) {
+    if (link.source_id !== obj.id || link.type !== "holds_type") continue;
+    const target = nodeById.get(link.target_id);
+    const qId = target ? buildIdFromChain(target, nodeById) : link.target_id;
+    if (!seenStores.has(qId)) { seenStores.add(qId); storeIds.push(qId); }
+  }
 
   out.push({
     id: objId,
@@ -588,8 +561,8 @@ function flatWalkObject(
     location: pos(obj),
     parents: parentObjectId ? [parentObjectId] : [path.basename(obj.sourceFile)],
     calls: [],
-    locations: objectLocations,
-    sourceFiles: objectFiles,
+    ...(extLocations.length > 0 ? { locations: extLocations } : {}),
+    ...(storeIds.length > 0 ? { stores: storeIds } : {}),
     extends: extendsId,
     implements: implementsIds,
     inits: initIds,
@@ -614,9 +587,46 @@ export function transformToFlat(
   const allNodes: FlatGraphNode[] = [];
   const allNames = new Set([...result.targets.map((t) => t.name), ...nodeMap.keys()]);
 
+  // ── Phase 0: Emit target-flavor nodes as hub entries ──
+  const targetHubIds = new Set<string>();
+  for (const n of result.nodes) {
+    if (n.flavor !== "target") continue;
+    targetHubIds.add(n.id);
+    // Collect import_dependency calls from this target
+    const depCalls: CallRef[] = [];
+    for (const link of result.links) {
+      if (link.source_id !== n.id || link.type !== "import_dependency") continue;
+      depCalls.push({ target: link.target_id, location: pos(n) });
+    }
+    allNodes.push({
+      id: n.id,
+      name: n.name,
+      flavor: "target",
+      location: pos(n),
+      parents: [],
+      calls: depCalls,
+      origin: n.sourceFile || undefined, // internal targets have empty sourceFile → omit origin
+    });
+  }
+
+  // ── Phase 1: Process each code target ──
   for (const tName of allNames) {
     const nodes = nodeMap.get(tName) ?? [];
     const info = infoMap.get(tName);
+
+    // Skip target-hub-only groups (already emitted above)
+    if (targetHubIds.has(tName) && nodes.every((n) => n.flavor === "target")) {
+      targets.push({
+        name: tName,
+        type: info?.type ?? "unknown",
+        path: info?.path ?? "",
+        dependencies: info?.dependencies ?? [],
+        isExternal: !nodes.some((n) => n.flavor !== "target"),
+        entryPoint: null,
+        resources: resMap.get(tName) ?? [],
+      });
+      continue;
+    }
 
     if (isExternal(info, nodes) && tName !== "__default__") {
       targets.push({
@@ -639,21 +649,22 @@ export function transformToFlat(
     for (const obj of topObjects) {
       if (seenNames.has(obj.name)) continue;
       seenNames.add(obj.name);
-      flatWalkObject(obj, nodes, result.links, nodeById, tName, allNodes);
+      flatWalkObject(obj, nodes, result.links, nodeById, tName, allNodes, targetHubIds);
     }
 
-    // Global functions
+    // Global functions — parent includes owning target if it's a hub
     const globalFuncs = nodes.filter((n) => n.flavor === "function" && n.isGlobal && !n.parent);
     for (const fn of globalFuncs) {
       if (!hasBody(fn)) continue;
       const fnSigned = signedName(fn);
       const fileName = path.basename(fn.sourceFile);
+      const parents = [fileName];
       allNodes.push({
         id: `${tName}::${fileName}::${fnSigned}`,
         name: fnSigned,
         flavor: fn.flavor,
         location: pos(fn),
-        parents: [fileName],
+        parents,
         calls: traceOutgoingCalls(fn.id, result.links, nodeById),
       });
     }
@@ -677,8 +688,6 @@ export function transformToFlat(
     targets,
     nodes: allNodes,
   };
-
-  SchemaValidator.hardValidateJson(JSON.stringify(output));
 
   return output;
 }

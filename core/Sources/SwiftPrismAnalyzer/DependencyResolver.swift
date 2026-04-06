@@ -8,6 +8,9 @@ struct DependencyResolver {
     let targets: [ParsedTarget]
     let macros: [MacroInfo]
     let publicOnlyTargets: Set<String>
+    let fileImports: [String: [String]]
+    let projectRoot: String
+    let resolvedURLs: [String: String]
 
     private static let resourceProviderProtocols: Set<String> = [
         "ResourceProvider", "AssetProvider", "ImageProvider", "ColorProvider",
@@ -256,6 +259,8 @@ struct DependencyResolver {
             }
         }
 
+        let typeResolver = TypeModuleResolver(symbols: symbols)
+
         let nodes = symbols
             .filter { sym in
                 if publicOnlyTargets.contains(sym.targetName ?? "") {
@@ -287,8 +292,8 @@ struct DependencyResolver {
                     extensions: isType ? extFiles.map { Array($0).sorted() } : nil,
                     signature: sym.signature,
                     isProtocolRequirement: sym.isProtocolRequirement,
-                    returnTypes: sym.returnTypes,
-                    parameterTypes: sym.parameterTypes
+                    returnTypes: typeResolver.resolveModules(for: sym.returnTypes),
+                    parameterTypes: typeResolver.resolveModules(for: sym.parameterTypes)
                 )
             }
 
@@ -405,6 +410,145 @@ struct DependencyResolver {
                             break
                         }
                     }
+                }
+            }
+        }
+
+        // --- Target Nodes (Internal + External + System) ---
+        let systemFrameworks: Set<String> = [
+            "Swift", "Foundation", "UIKit", "SwiftUI", "CoreFoundation", "CoreGraphics",
+            "CoreData", "CoreLocation", "MapKit", "AVFoundation", "Photos", "Contacts",
+            "EventKit", "StoreKit", "GameKit", "CloudKit", "WatchKit", "WidgetKit",
+            "AppKit", "SceneKit", "SpriteKit", "Metal", "MetalKit", "CoreImage",
+            "CoreText", "CoreAnimation", "QuartzCore", "Security", "CryptoKit",
+            "os", "Dispatch", "ObjectiveC", "Darwin", "Combine", "Observation",
+            "RegexBuilder", "SwiftData", "RealityKit", "ARKit", "CoreML",
+            "NaturalLanguage", "Vision", "CoreBluetooth", "CoreMotion",
+            "CoreTelephony", "NetworkExtension", "Network", "MultipeerConnectivity",
+            "UserNotifications", "BackgroundTasks", "CoreSpotlight", "Intents",
+            "IntentsUI", "ActivityKit", "TipKit", "Charts", "WeatherKit",
+            "PackageDescription", "XCTest", "Testing", "SwiftCompilerPlugin",
+        ]
+
+        var createdTargetIds = Set<String>()
+
+        // 1) Internal targets — no origin (managed by GLOBAL::MAIN)
+        //    sourceFile = "" signals "internal, omit origin in flat output"
+        for target in targets where !target.isExternal {
+            let targetId = target.name
+            guard createdTargetIds.insert(targetId).inserted else { continue }
+            allNodes.append(Node(
+                id: targetId, name: target.name, flavor: .target, subKind: nil,
+                isStatic: false, isGlobal: true, isNested: false, isInteresting: true,
+                access: .public, parent: nil, parentFile: nil, sourceFile: "",
+                location: SourceLocation(file: "", line: 0, column: 0),
+                targetName: targetId, memberCount: nil,
+                parents: nil, implementers: nil, superClass: nil, extensions: nil
+            ))
+        }
+
+        // 2) External targets (SPM/CocoaPods)
+        //    Remote → Git URL from Package.resolved
+        //    Local  → absolute path to the dependency folder
+        for target in targets where target.isExternal {
+            let targetId = target.name
+            guard createdTargetIds.insert(targetId).inserted else { continue }
+            let gitURL = target.remoteURL
+                ?? resolvedURLs[target.name]
+                ?? resolvedURLs[target.name.lowercased()]
+            let origin: String
+            if let url = gitURL {
+                origin = url                          // Remote: Git URL
+            } else if target.path.hasPrefix("/") {
+                origin = target.path                   // Local: absolute path
+            } else {
+                origin = projectRoot + "/" + target.path
+            }
+            allNodes.append(Node(
+                id: targetId, name: target.name, flavor: .target, subKind: nil,
+                isStatic: false, isGlobal: true, isNested: false, isInteresting: true,
+                access: .public, parent: nil, parentFile: nil, sourceFile: origin,
+                location: SourceLocation(file: origin, line: 0, column: 0),
+                targetName: targetId, memberCount: nil,
+                parents: nil, implementers: nil, superClass: nil, extensions: nil
+            ))
+        }
+
+        // 3) System framework + imported module nodes
+        var allImportedModules = Set<String>()
+        for (_, imports) in fileImports {
+            for imp in imports { allImportedModules.insert(imp) }
+        }
+
+        for moduleName in allImportedModules {
+            guard moduleName != "Swift" else { continue }
+            guard createdTargetIds.insert(moduleName).inserted else { continue }
+            let isSystem = systemFrameworks.contains(moduleName)
+            let origin: String
+            if isSystem {
+                origin = "Apple"                       // Apple SDK
+            } else if let url = resolvedURLs[moduleName] ?? resolvedURLs[moduleName.lowercased()] {
+                origin = url                           // Remote: Git URL
+            } else {
+                origin = "External"                    // Unknown external
+            }
+            allNodes.append(Node(
+                id: moduleName, name: moduleName, flavor: .target, subKind: nil,
+                isStatic: false, isGlobal: true, isNested: false, isInteresting: true,
+                access: .public, parent: nil, parentFile: nil, sourceFile: origin,
+                location: SourceLocation(file: origin, line: 0, column: 0),
+                targetName: moduleName, memberCount: nil,
+                parents: nil, implementers: nil, superClass: nil, extensions: nil
+            ))
+        }
+
+        // Build file→owning-target map
+        let fileToTarget: [String: String] = {
+            var m: [String: String] = [:]
+            for sym in symbols {
+                if let t = sym.targetName {
+                    m[sym.sourceFile] = t
+                    let basename = sym.sourceFile.split(separator: "/").last.map(String.init) ?? sym.sourceFile
+                    m[basename] = t
+                }
+            }
+            return m
+        }()
+
+        // Link MAIN entry points → owning internal target
+        for (targetName, _) in entryPointsByTarget {
+            let mainId = "MAIN::\(targetName)"
+            if createdTargetIds.contains(targetName) {
+                let key = "\(mainId)->\(targetName):import_dependency"
+                if seen.insert(key).inserted {
+                    links.append(Link(sourceId: mainId, targetId: targetName, type: .importDependency, confidence: .high, references: nil))
+                }
+            }
+        }
+
+        // Link import_dependency: owning target → imported framework
+        let internalTargetNames = Set(targets.filter { !$0.isExternal }.map(\.name))
+        for (filePath, imports) in fileImports {
+            let fileBasename = filePath.split(separator: "/").last.map(String.init) ?? filePath
+            guard let ownerTarget = fileToTarget[filePath] ?? fileToTarget[fileBasename] else { continue }
+            for moduleName in imports {
+                guard moduleName != "Swift" else { continue }
+                guard moduleName != ownerTarget else { continue }
+                let key = "\(ownerTarget)->\(moduleName):import_dependency"
+                if seen.insert(key).inserted {
+                    links.append(Link(sourceId: ownerTarget, targetId: moduleName, type: .importDependency, confidence: .high, references: nil))
+                }
+            }
+        }
+
+        // Link symbols whose parameterTypes/returnTypes resolve to external modules
+        for node in nodes {
+            let resolvedModules = (node.parameterTypes ?? []) + (node.returnTypes ?? [])
+            for moduleName in resolvedModules {
+                guard createdTargetIds.contains(moduleName), !internalTargetNames.contains(moduleName) else { continue }
+                let key = "\(node.id)->\(moduleName):import_dependency:\(moduleName)"
+                if seen.insert(key).inserted {
+                    links.append(Link(sourceId: node.id, targetId: moduleName, type: .importDependency, confidence: .medium, references: nil))
                 }
             }
         }

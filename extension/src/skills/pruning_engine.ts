@@ -59,9 +59,6 @@ function buildChildIndex(nodes: FlatGraphNode[]): ChildIndex {
 }
 
 function collectNodeFiles(node: FlatGraphNode): string[] {
-  if (node.locations && node.locations.length > 0) {
-    return node.locations.map((loc) => loc.absPath);
-  }
   if (node.location.absPath) {
     return [node.location.absPath];
   }
@@ -77,10 +74,13 @@ function classifyImpact(node: FlatGraphNode): "high" | "low" {
 }
 
 function isVisibleSymbol(node: FlatGraphNode): boolean {
+  if (node.flavor === "target") return true;
   if (OBJECT_FLAVORS.has(node.flavor)) return true;
-  if (EXECUTABLE_FLAVORS.has(node.flavor)) return node.calls.length > 0;
-  if (node.flavor === "variable") return true;
+  if (EXECUTABLE_FLAVORS.has(node.flavor)) return true;
   if (node.flavor === "macro") return true;
+  // Variables are only visible if they have an executable body (computed/observer)
+  // Stored properties (no body) are forbidden from the graph
+  if (node.flavor === "variable") return false;
   return false;
 }
 
@@ -213,7 +213,8 @@ export class PruningEngineService {
       }
     }
 
-    if (OBJECT_FLAVORS.has(node.flavor) || node.flavor === "variable") {
+    // Walk into children only for Object containers and target hubs
+    if (OBJECT_FLAVORS.has(node.flavor) || node.flavor === "target") {
       const children = this.childIndex.get(node.id) ?? [];
       for (const child of children) {
         this.dfsTrace(child.id, visited, visitedFiles, chain);

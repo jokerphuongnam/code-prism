@@ -8,7 +8,8 @@ export type SymbolFlavor =
   | "variable"
   | "initializer"
   | "macro"
-  | "entry_point";
+  | "entry_point"
+  | "target";
 
 export type SymbolSubKind =
   | "willSet"
@@ -42,7 +43,8 @@ export type LinkType =
   | "environment_injection"
   | "environment_provider"
   | "holds_type"
-  | "enum_usage";
+  | "enum_usage"
+  | "import_dependency";
 
 export type LinkConfidence = "high" | "medium" | "low";
 
@@ -92,6 +94,10 @@ export interface PrismNode {
   memberCount: number | null;
   signature?: string | null;
   isProtocolRequirement?: boolean;
+  /** Object-only: extension block locations for "Defined In" navigation */
+  locations?: { file: string; line: number; column: number }[];
+  /** Target-only: origin path/URL */
+  origin?: string;
 }
 
 export interface ResourceNode {
@@ -180,13 +186,17 @@ export interface FlatMapEntry {
   flavor: string;
   location: { absPath: string; line: number; col: number };
   parents: string[];
-  calls: string[];
-  locations?: { absPath: string; line: number; col: number; type: string }[];
-  sourceFiles?: string[];
+  calls?: string[];
+  /** Object-only: extension block locations for "Defined In" navigation */
+  locations?: { absPath: string; line: number; col: number }[];
   inits?: string[];
   deinits?: string[];
   extends?: string | null;
   implements?: string[];
+  stores?: string[];
+  returns?: string[];
+  parameters?: string[];
+  origin?: string;
 }
 
 export interface FilePreview {

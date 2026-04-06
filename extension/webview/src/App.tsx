@@ -18,36 +18,58 @@ export type ViewTab = "graph" | "json" | "guide";
 const IDLE_PROGRESS: ProgressInfo = { phase: "idle", processed: 0, total: 0 };
 
 function flatMapToAnalysisResult(entries: FlatMapEntry[]): AnalysisResult {
-  const nodes = entries.map((e) => ({
-    id: e.id,
-    name: e.name,
-    flavor: e.flavor as AnalysisResult["nodes"][number]["flavor"],
-    subKind: null,
-    isStatic: false,
-    isGlobal: e.parents.length === 0 || e.parents[0]?.endsWith(".swift"),
-    isNested: false,
-    isInteresting: true,
-    access: "internal" as const,
-    parent: e.parents[0]?.includes("::") ? e.parents[0].split("::").pop() ?? null : null,
-    parentFile: e.parents[0]?.endsWith(".swift") ? e.parents[0] : null,
-    sourceFile: e.location.absPath.split("/").pop() ?? e.location.absPath,
-    location: { file: e.location.absPath, line: e.location.line, column: e.location.col },
-    targetName: e.id.split("::")[0] ?? null,
-    memberCount: null,
-  }));
+  const nodes = entries.map((e) => {
+    const isTarget = e.flavor === "target";
+    return {
+      id: e.id,
+      name: e.name,
+      flavor: e.flavor as AnalysisResult["nodes"][number]["flavor"],
+      subKind: null,
+      isStatic: false,
+      isGlobal: isTarget || e.parents.length === 0 || e.parents[0]?.endsWith(".swift"),
+      isNested: false,
+      isInteresting: true,
+      access: "internal" as const,
+      parent: e.parents[0]?.includes("::") ? e.parents[0].split("::").pop() ?? null : null,
+      parentFile: e.parents[0]?.endsWith(".swift") ? e.parents[0] : null,
+      sourceFile: isTarget ? (e.origin ?? e.location.absPath) : (e.location.absPath.split("/").pop() ?? e.location.absPath),
+      location: { file: e.location.absPath, line: e.location.line, column: e.location.col },
+      targetName: isTarget ? e.id : (e.id.split("::")[0] ?? null),
+      memberCount: null,
+      ...(e.locations ? { locations: e.locations.map(l => ({ file: l.absPath, line: l.line, column: l.col })) } : {}),
+      ...(isTarget && e.origin ? { origin: e.origin } : {}),
+    };
+  });
 
   const nodeIds = new Set(entries.map((e) => e.id));
-  const links = entries.flatMap((e) =>
-    e.calls
+
+  // Execution links: calls + import_dependency
+  const callLinks = entries.flatMap((e) =>
+    (e.calls ?? [])
       .filter((targetId) => nodeIds.has(targetId))
       .map((targetId) => ({
         source_id: e.id,
         target_id: targetId,
-        type: "call" as const,
+        type: e.flavor === "target" ? "import_dependency" as const : "call" as const,
         confidence: null,
         references: null,
       }))
   );
+
+  // Storage links: Object → stored type dependency
+  const storeLinks = entries.flatMap((e) =>
+    (e.stores ?? [])
+      .filter((targetId) => nodeIds.has(targetId))
+      .map((targetId) => ({
+        source_id: e.id,
+        target_id: targetId,
+        type: "holds_type" as const,
+        confidence: null,
+        references: null,
+      }))
+  );
+
+  const links = [...callLinks, ...storeLinks];
 
   return {
     projectRoot: null,
@@ -83,23 +105,32 @@ export function App() {
           const ids = new Set(p.nodes.map((n) => n.id));
           const broken = p.links.filter((l) => !ids.has(l.source_id) || !ids.has(l.target_id));
           if (broken.length > 0) console.warn(`[SwiftPrism] ${broken.length} links reference missing node IDs`);
-          console.log("[SwiftPrism] Sample nodes:", p.nodes.slice(0, 3).map((n) => `${n.id} [${n.flavor}]`));
-          console.log("[SwiftPrism] Sample links:", p.links.slice(0, 3).map((l) => `${l.source_id} -> ${l.target_id}`));
         }
         lkgResult.current = p;
-        setResult(p);
+        // Force full state clear before applying new data
+        setResult(null);
         setFlatEntries(null);
         setError(null);
-        setProgress({ phase: "complete", processed: 1, total: 1 });
+        // Apply new data on next tick to ensure graph teardown completes
+        setTimeout(() => {
+          setResult(p);
+          setProgress({ phase: "complete", processed: 1, total: 1 });
+        }, 0);
         break;
       }
-      case "mappingData":
+      case "mappingData": {
         console.log(`[SwiftPrism] Received mappingData: ${msg.payload.length} entries`);
-        setFlatEntries(msg.payload);
+        // Force full state clear before applying new data
+        setResult(null);
+        setFlatEntries(null);
         setError(null);
-        setProgress({ phase: "complete", processed: 1, total: 1 });
-        setJsonLoading(false);
+        setTimeout(() => {
+          setFlatEntries(msg.payload);
+          setProgress({ phase: "complete", processed: 1, total: 1 });
+          setJsonLoading(false);
+        }, 0);
         break;
+      }
       case "progress":
         setProgress(msg.progress);
         setError(null);
