@@ -104,6 +104,49 @@ build_extension_native() {
     return 0
 }
 
+build_mcp_server() {
+    if [ ! -d "mcp-server" ]; then
+        print_warn "MCP server directory not found — skipping"
+        return 0
+    fi
+
+    print_step "Building MCP Server & Mini Agent"
+    cd mcp-server
+    npm install 2>&1 | tail -3
+    npx tsc 2>&1
+    cd ..
+
+    print_step "Writing shared config"
+    cat > swiftprism-config.json <<CFGEOF
+{
+  "graphPath": "$(pwd)/extension/out/prism-context.json",
+  "mcpServer": "$(pwd)/mcp-server/dist/server.js",
+  "extensionBin": "$(pwd)/extension/bin/swift-prism-analyzer"
+}
+CFGEOF
+
+    chmod +x dist/server.js
+    cd ..
+
+    print_step "Linking swift-prism-mcp globally"
+    cd mcp-server
+    npm link 2>&1 | tail -3 || {
+        print_warn "npm link failed (try with sudo or set npm prefix). You can still use the full path."
+    }
+    cd ..
+
+    print_done "MCP Server built — swift-prism-mcp command available"
+    printf "\n  Claude Desktop config:\n"
+    printf "  {\n"
+    printf "    \"mcpServers\": {\n"
+    printf "      \"swiftprism\": {\n"
+    printf "        \"command\": \"swift-prism-mcp\"\n"
+    printf "      }\n"
+    printf "    }\n"
+    printf "  }\n\n"
+    return 0
+}
+
 build_extension_from_docker() {
     if ! docker_available; then
         return 1
@@ -265,6 +308,7 @@ if docker_available; then
         BUILD_MODE="native"
         build_swift_native || exit 1
         build_extension_native || exit 1
+        build_mcp_server || true
         verify_binary
         generate_context "$@"
         print_banner
@@ -305,6 +349,7 @@ BUILD_MODE="native"
 print_warn "Docker not available — using native build"
 build_swift_native || exit 1
 build_extension_native || exit 1
+build_mcp_server || true
 verify_binary
 generate_context "$@"
 print_banner
