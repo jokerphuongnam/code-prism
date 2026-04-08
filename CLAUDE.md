@@ -2,9 +2,12 @@
 
 ## Architecture
 
-Monorepo: `core/` (Swift CLI with SwiftSyntax) + `extension/` (VS Code + React/Three.js webview).
+Three-layer monorepo:
+- `core/` — Swift CLI (SwiftSyntax AST analysis)
+- `extension/` — VS Code extension (React + Three.js 3D webview)
+- `mcp-server/` — MCP server (fragmented graph access for Claude)
 
-Swift binary outputs flat JSON (`FlatMapEntry[]`). Extension reads it and renders a 3D force-directed graph.
+Swift binary outputs flat JSON (`FlatMapEntry[]`). Extension renders it as a 3D graph. MCP server fragments it into per-object files for on-demand AI access.
 
 ## Execution-First Rendering Model
 
@@ -85,6 +88,23 @@ When new analysis data arrives (`analysisResult` or `mappingData` message):
 2. Tear down the force-graph instance (pause, destroy, clear DOM)
 3. Apply new data on next tick
 4. Reset `initialLoadDone` so the graph gets a fresh simulation
+
+## MCP Server & Graph Fragmentation
+
+### Stealth Discovery
+The MCP server walks upward from CWD to find `.git`/`Package.swift`, then checks `.swiftprism/` for `swiftprism-config.json` and `graph-index.json`. In stealth mode (`SWIFTPRISM_MODE=stealth`), only `.swiftprism/` is checked — no visible root configs.
+
+### Fragment Architecture
+The monolithic graph is split into:
+- `_targets.json` — target hub nodes
+- `_shared.json` — bridge nodes referenced by 2+ logic flows
+- `_globals.json` — top-level functions
+- `ClassName.json` — per-object fragments
+
+The `graph-index.json` maps `{ nodeId → fragmentFile }`. The server loads only the files it needs per request and stitches them via reference-ID pointers.
+
+### Stay-Alive Protocol
+The server NEVER calls `process.exit()`. If graph data is missing, all tools return guidance text and the MCP connection stays green.
 
 ## Removed Fields (Do Not Re-add)
 

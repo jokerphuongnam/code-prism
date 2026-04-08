@@ -31,7 +31,7 @@ export class CacheManager {
   }
 
   cleanupWorkspaceArtifacts(workspaceRoot: string): number {
-    const artifacts = ["prism-context.json", "analysis_results.json", "mapping.json"];
+    const artifacts = ["prism-context.json", "swiftprism-config.json", "analysis_results.json", "mapping.json"];
     let cleaned = 0;
     for (const name of artifacts) {
       const filePath = path.join(workspaceRoot, name);
@@ -51,6 +51,7 @@ export class CacheManager {
     return files.length;
   }
 
+  // TODO: Potential Redundant — pruneStale not currently called
   pruneStale(): number {
     if (!fs.existsSync(this.cacheDir)) return 0;
     const now = Date.now();

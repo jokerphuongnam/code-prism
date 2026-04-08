@@ -1,4 +1,7 @@
 
+# ── SwiftPrism Hidden Data ──────────────────────────────────────
+.swiftprism/
+
 # ── OS Artifacts ─────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
@@ -75,6 +78,7 @@ npm-debug.log*
 
 # ── Generated Context (rebuild via run.sh) ──────────────────────
 prism-context.json
+swiftprism-config.json
 node_modules
 package-lock.json
 settings.json

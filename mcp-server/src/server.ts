@@ -4,24 +4,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import * as fs from "fs";
 import * as path from "path";
-
-interface GraphNode {
-  id: string;
-  name: string;
-  flavor: string;
-  location: { absPath: string; line: number; col: number };
-  parents: string[];
-  calls?: string[];
-  returns?: string[];
-  parameters?: string[];
-  inits?: string[];
-  deinits?: string[];
-  extends?: string | null;
-  implements?: string[];
-  stores?: string[];
-  locations?: { absPath: string; line: number; col: number }[];
-  origin?: string;
-}
+import { FragmentLoader, fragmentGraph, type GraphNode } from "./fragment-store.js";
+import { applyStealthCompression } from "./node-context-generator.js";
 
 interface GraphData {
   nodes: GraphNode[];
@@ -34,86 +18,266 @@ interface ProjectPaths {
   projectRoot: string;
 }
 
-function resolveProjectPaths(): ProjectPaths {
-  const cwd = process.cwd();
-  const cwdConfig = path.join(cwd, "swiftprism-config.json");
-  if (fs.existsSync(cwdConfig)) {
-    const cfg = JSON.parse(fs.readFileSync(cwdConfig, "utf-8"));
-    if (cfg.graphPath && fs.existsSync(cfg.graphPath)) {
-      return {
-        graphPath: cfg.graphPath,
-        contextsDir: cfg.contextsDir ?? path.join(path.dirname(cfg.graphPath), "contexts"),
-        projectRoot: cwd,
-      };
+// ═══════════════════════════════════════════════════════════════════════════════
+// PROJECT DISCOVERY — Hidden Data Resolution
+//
+// 1. Walk upward from CWD to find the Project Anchor (.git, Package.swift, .xcodeproj)
+// 2. Resolve hidden data at <anchor>/.swiftprism/swiftprism-config.json
+// 3. Fall back to visible swiftprism-config.json at anchor root (legacy)
+// 4. Fall back to prism-context.json at anchor root (pre-config era)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const PROJECT_ANCHORS = [".git", "Package.swift"];
+const HIDDEN_DIR = ".swiftprism";
+const HIDDEN_CONFIG = "swiftprism-config.json";
+const STEALTH_MODE = process.env.SWIFTPRISM_MODE === "stealth";
+const STEALTH_COMPRESSION = process.env.SWIFTPRISM_COMPRESS === "1";
+
+// ── Project Anchor Discovery ──
+// Walk upward from startDir to find the nearest directory containing
+// .git, Package.swift, or *.xcodeproj. Returns the anchor directory.
+function findProjectRoot(startDir: string): string | null {
+  let dir = startDir;
+  while (true) {
+    for (const anchor of PROJECT_ANCHORS) {
+      if (fs.existsSync(path.join(dir, anchor))) return dir;
+    }
+    try {
+      if (fs.readdirSync(dir).some((e: string) => e.endsWith(".xcodeproj"))) return dir;
+    } catch { /* unreadable — skip */ }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+// ── Config Loader ──
+// Reads swiftprism-config.json, resolves relative paths against baseDir,
+// and verifies the graph file exists on disk.
+function tryLoadConfig(configPath: string, baseDir: string, projectRoot: string): ProjectPaths | null {
+  if (!fs.existsSync(configPath)) return null;
+  try {
+    const cfg = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    const resolvedGraph = cfg.graphPath
+      ? (path.isAbsolute(cfg.graphPath) ? cfg.graphPath : path.resolve(baseDir, cfg.graphPath))
+      : null;
+    if (!resolvedGraph || !fs.existsSync(resolvedGraph)) return null;
+    return {
+      graphPath: resolvedGraph,
+      contextsDir: cfg.contextsDir
+        ? (path.isAbsolute(cfg.contextsDir) ? cfg.contextsDir : path.resolve(baseDir, cfg.contextsDir))
+        : path.join(path.dirname(resolvedGraph), "contexts"),
+      projectRoot,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ── Path Resolution ──
+// Priority order:
+//   1. <anchor>/.swiftprism/swiftprism-config.json  (hidden / stealth)
+//   2. <anchor>/swiftprism-config.json              (visible — skipped in stealth mode)
+//   3. <anchor>/prism-context.json                  (legacy — skipped in stealth mode)
+//   4. Walk upward from CWD checking each dir       (fallback if no anchor found)
+function resolveProjectPaths(): ProjectPaths | null {
+  // PRISM_CWD overrides process.cwd() for location-agnostic deployment
+  const cwd = process.env.PRISM_CWD || process.cwd();
+  const anchor = findProjectRoot(cwd);
+
+  if (anchor) {
+    // Priority 1: Hidden config
+    const hiddenDir = path.join(anchor, HIDDEN_DIR);
+    const hidden = tryLoadConfig(path.join(hiddenDir, HIDDEN_CONFIG), hiddenDir, anchor);
+    if (hidden) return hidden;
+
+    if (!STEALTH_MODE) {
+      // Priority 2: Visible config at anchor root
+      const visible = tryLoadConfig(path.join(anchor, HIDDEN_CONFIG), anchor, anchor);
+      if (visible) return visible;
+
+      // Priority 3: Legacy prism-context.json
+      const legacyPath = path.join(anchor, "prism-context.json");
+      if (fs.existsSync(legacyPath)) {
+        return { graphPath: legacyPath, contextsDir: path.join(anchor, "out", "contexts"), projectRoot: anchor };
+      }
     }
   }
 
+  // Fallback: walk upward from CWD checking every directory
   let dir = cwd;
-  for (let i = 0; i < 10; i++) {
-    const candidate = path.join(dir, "swiftprism-config.json");
-    if (fs.existsSync(candidate)) {
-      const cfg = JSON.parse(fs.readFileSync(candidate, "utf-8"));
-      if (cfg.graphPath && fs.existsSync(cfg.graphPath)) {
-        return {
-          graphPath: cfg.graphPath,
-          contextsDir: cfg.contextsDir ?? path.join(path.dirname(cfg.graphPath), "contexts"),
-          projectRoot: dir,
-        };
-      }
+  while (true) {
+    const hiddenDir = path.join(dir, HIDDEN_DIR);
+    const hidden = tryLoadConfig(path.join(hiddenDir, HIDDEN_CONFIG), hiddenDir, dir);
+    if (hidden) return hidden;
+
+    if (!STEALTH_MODE) {
+      const visible = tryLoadConfig(path.join(dir, HIDDEN_CONFIG), dir, dir);
+      if (visible) return visible;
     }
-    const direct = path.join(dir, "prism-context.json");
-    if (fs.existsSync(direct)) {
-      return {
-        graphPath: direct,
-        contextsDir: path.join(dir, "out", "contexts"),
-        projectRoot: dir,
-      };
-    }
+
     const parent = path.dirname(dir);
     if (parent === dir) break;
     dir = parent;
   }
 
-  throw new Error(
-    "Please run ./run.sh in the project root to initialize the context fragments. " +
-    "Searched from: " + cwd
-  );
+  return null;
 }
 
-function loadGraph(): GraphData {
-  const { graphPath } = resolveProjectPaths();
-  const raw = fs.readFileSync(graphPath, "utf-8");
-  return JSON.parse(raw);
+const NOT_CONFIGURED_MSG =
+  "Graph data not found. Please run ./run.sh in your project root to initialize the " +
+  (STEALTH_MODE ? "stealth context." : "graph data.");
+
+function notConfiguredResponse() {
+  return { content: [{ type: "text" as const, text: NOT_CONFIGURED_MSG }] };
 }
 
-function loadFragments(contextsDir: string, prefix: string): GraphNode[] {
-  if (!fs.existsSync(contextsDir)) return [];
-  const files = fs.readdirSync(contextsDir).filter((f) => f.startsWith(prefix) && f.endsWith(".json"));
-  const nodes: GraphNode[] = [];
-  for (const file of files) {
-    try {
-      const raw = fs.readFileSync(path.join(contextsDir, file), "utf-8");
-      const data = JSON.parse(raw);
-      if (Array.isArray(data)) nodes.push(...data);
-    } catch {}
+// ═══════════════════════════════════════════════════════════════════════════════
+// DATA ACCESS — Fragment-first, monolithic fallback
+//
+// When fragments exist (.swiftprism/graph-index.json), nodes are loaded
+// on-demand from small per-object files. Nothing persists in memory.
+// When only a monolithic graph exists, it's loaded per-request then freed.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function getFragmentLoader(): FragmentLoader | null {
+  const paths = resolveProjectPaths();
+  if (!paths) return null;
+  const loader = new FragmentLoader(path.dirname(paths.graphPath));
+  return loader.available ? loader : null;
+}
+
+function loadGraph(): GraphData | null {
+  const paths = resolveProjectPaths();
+  if (!paths) return null;
+  try {
+    const raw = fs.readFileSync(paths.graphPath, "utf-8");
+    const parsed = JSON.parse(raw);
+    // Handle both formats: raw array or {nodes, targets} object
+    if (Array.isArray(parsed)) return { nodes: parsed };
+    return parsed;
+  } catch {
+    return null;
   }
-  return nodes;
+}
+
+/** Auto-fragment the monolithic graph if fragments don't exist yet */
+function ensureFragments(): FragmentLoader | null {
+  const paths = resolveProjectPaths();
+  if (!paths) return null;
+  const stealthDir = path.dirname(paths.graphPath);
+  const loader = new FragmentLoader(stealthDir);
+  if (loader.available) return loader;
+
+  // Auto-fragment from monolithic graph
+  if (fs.existsSync(paths.graphPath)) {
+    try {
+      console.error("[SwiftPrism MCP] Auto-fragmenting graph for on-demand loading...");
+      fragmentGraph(paths.graphPath, stealthDir);
+      console.error("[SwiftPrism MCP] Fragmentation complete.");
+      loader.invalidate();
+      return loader.available ? loader : null;
+    } catch (err) {
+      console.error("[SwiftPrism MCP] Fragmentation failed (non-fatal):", err);
+    }
+  }
+  return null;
 }
 
 function findNode(id: string): GraphNode | undefined {
-  return loadGraph().nodes.find((n) => n.id === id);
+  // Try fragment loader first (single file read)
+  const loader = getFragmentLoader();
+  if (loader) {
+    const node = loader.loadNode(id);
+    return node ?? undefined;
+  }
+  // Fallback: monolithic
+  return loadGraph()?.nodes.find((n) => n.id === id);
 }
 
-function findNodesByParent(parentId: string): GraphNode[] {
-  return loadGraph().nodes.filter((n) => n.parents.includes(parentId));
+// ═══════════════════════════════════════════════════════════════════════════════
+// TOKEN-OPTIMIZED OUTPUT — Prefer node_context over full node data
+//
+// When node_context is present, return a compact representation.
+// If stealth compression is active, further shorten Swift terms.
+// Full source is only sent when explicitly requested (full_source=true).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Atomic node response — One Node = One JSON.
+ * Contains only this node's own data. Never inlines other nodes' contexts.
+ * The agent calls get_node_info on each ID in calls/inits/parents to fetch their data.
+ */
+function toTokenOptimized(node: GraphNode, fullSource: boolean = false): Record<string, any> {
+  if (fullSource || !node.node_context) {
+    return node;
+  }
+
+  const context = STEALTH_COMPRESSION
+    ? applyStealthCompression(node.node_context)
+    : node.node_context;
+
+  return {
+    id: node.id,
+    name: node.name,
+    flavor: node.flavor,
+    node_context: context,
+    location: node.location,
+    parents: node.parents,
+    ...(node.calls?.length ? { calls: node.calls } : {}),
+    ...(node.inits?.length ? { inits: node.inits } : {}),
+    ...(node.deinits?.length ? { deinits: node.deinits } : {}),
+    ...(node.stores?.length ? { stores: node.stores } : {}),
+  };
+}
+
+/**
+ * Resolve tagged index references in a node_context string.
+ * Replaces c[0], i[1], di[0], imp[2] etc. with the actual entity name from the node's arrays.
+ * The original symbolic operators (!, ?, ~>, ->) are preserved.
+ */
+function resolveIndexTags(context: string, node: GraphNode): string {
+  return context.replace(/(!|~>|\?|->)?(c|i|di|imp)\[(\d+)\]/g, (_match, prefix, tag, idxStr) => {
+    const idx = parseInt(idxStr, 10);
+    let arr: string[] | undefined;
+    if (tag === "c") arr = node.calls;
+    else if (tag === "i") arr = node.inits;
+    else if (tag === "di") arr = node.deinits;
+    else if (tag === "imp") arr = node.implements;
+
+    const resolved = arr?.[idx];
+    if (!resolved) return _match; // index out of bounds — keep original
+    const name = resolved.split("::").pop() ?? resolved;
+    return `${prefix ?? ""}${name}`;
+  });
+}
+
+function toTokenOptimizedFragment(id: string, nodeById: Map<string, GraphNode>, fullSource: boolean = false): Record<string, any> {
+  const node = nodeById.get(id);
+  if (!node) return { id, name: id, flavor: "unknown" };
+  return toTokenOptimized(node, fullSource);
 }
 
 function findCallers(targetId: string): GraphNode[] {
-  return loadGraph().nodes.filter((n) =>
+  const loader = getFragmentLoader();
+  if (loader) {
+    // Scan fragments one at a time — each is freed after processing
+    const callers: GraphNode[] = [];
+    loader.forEachFragment((nodes) => {
+      for (const n of nodes) {
+        if (n.calls?.includes(targetId) || n.inits?.includes(targetId) || n.deinits?.includes(targetId)) {
+          callers.push(n);
+        }
+      }
+    });
+    return callers;
+  }
+  return loadGraph()?.nodes.filter((n) =>
     n.calls?.includes(targetId) ||
     n.inits?.includes(targetId) ||
     n.deinits?.includes(targetId)
-  );
+  ) ?? [];
 }
 
 function traceGraph(
@@ -153,13 +317,47 @@ function traceGraph(
   return { nodes: Array.from(visited), edges };
 }
 
+/** Load file-level and target-level meta summaries from _meta_summaries.json */
+function loadMetaSummaries(): { files: Record<string, string>; targets: Record<string, string> } | null {
+  const paths = resolveProjectPaths();
+  if (!paths) return null;
+  const metaPath = path.join(path.dirname(paths.graphPath), "_meta_summaries.json");
+  if (!fs.existsSync(metaPath)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
 const server = new McpServer({
   name: "swiftprism",
   version: "1.0.0",
 });
 
 server.resource("graph", "graph://entire", async (uri) => {
+  // Prefer fragment index stats (no full load)
+  const loader = getFragmentLoader();
+  if (loader) {
+    const stats = loader.getStats();
+    if (stats) {
+      const meta = loadMetaSummaries();
+      return {
+        contents: [{
+          uri: uri.href,
+          mimeType: "application/json",
+          text: JSON.stringify({
+            nodeCount: stats.nodeCount, fragmentCount: stats.fragmentCount,
+            sharedCount: stats.sharedCount, generatedAt: stats.generatedAt,
+            mode: "fragmented",
+            ...(meta ? { fileSummaryCount: Object.keys(meta.files).length, targetSummaryCount: Object.keys(meta.targets).length } : {}),
+          }),
+        }],
+      };
+    }
+  }
   const data = loadGraph();
+  if (!data) return { contents: [{ uri: uri.href, mimeType: "text/plain", text: NOT_CONFIGURED_MSG }] };
   return {
     contents: [
       {
@@ -168,6 +366,7 @@ server.resource("graph", "graph://entire", async (uri) => {
         text: JSON.stringify({
           nodeCount: data.nodes.length,
           targets: data.targets ?? [],
+          mode: "monolithic",
           flavors: Object.fromEntries(
             [...new Set(data.nodes.map((n) => n.flavor))].map((f) => [
               f,
@@ -186,6 +385,7 @@ server.resource(
   async (uri) => {
     const name = new URL(uri.href).hostname || uri.href.replace("target://", "");
     const data = loadGraph();
+    if (!data) return { contents: [{ uri: uri.href, mimeType: "text/plain", text: NOT_CONFIGURED_MSG }] };
     const nodes = data.nodes.filter(
       (n) => n.id.startsWith(`${name}::`) || n.id === name
     );
@@ -215,6 +415,7 @@ server.resource(
   async (uri) => {
     const filePath = uri.href.replace("file://", "");
     const data = loadGraph();
+    if (!data) return { contents: [{ uri: uri.href, mimeType: "text/plain", text: NOT_CONFIGURED_MSG }] };
     const nodes = data.nodes.filter(
       (n) =>
         n.location.absPath.endsWith(filePath) ||
@@ -228,6 +429,12 @@ server.resource(
           text: JSON.stringify({
             file: filePath,
             nodeCount: nodes.length,
+            ...((() => {
+              const meta = loadMetaSummaries();
+              if (!meta) return {};
+              const match = Object.entries(meta.files).find(([p]) => p.endsWith(filePath));
+              return match ? { semantic_context: match[1] } : {};
+            })()),
             nodes: nodes.map((n) => ({
               id: n.id,
               name: n.name,
@@ -243,17 +450,25 @@ server.resource(
 
 server.tool(
   "get_node_info",
-  { node_id: z.string().describe("Full namespaced node ID (e.g. Cryptoday::AppDelegate::viewDidLoad())") },
-  async ({ node_id }) => {
+  {
+    node_id: z.string().describe("Full namespaced node ID (e.g. Cryptoday::AppDelegate::viewDidLoad())"),
+    full_source: z.boolean().default(false).describe("If true, return full node data instead of pre-digested context"),
+  },
+  async ({ node_id, full_source }) => {
     const node = findNode(node_id);
     if (!node) {
       return { content: [{ type: "text" as const, text: `Node not found: ${node_id}` }] };
+    }
+    const result = toTokenOptimized(node, full_source);
+    // Auto-resolve index tags if node_context contains tagged references
+    if (result.node_context && /[cdi]\[\d+\]|imp\[\d+\]/.test(result.node_context)) {
+      result.resolved_context = resolveIndexTags(result.node_context, node);
     }
     return {
       content: [
         {
           type: "text" as const,
-          text: JSON.stringify(node, null, 2),
+          text: JSON.stringify(result, null, 2),
         },
       ],
     };
@@ -298,12 +513,10 @@ server.tool(
     const callers = findCallers(node_id);
     const node = findNode(node_id);
 
+    // Atomic: return only IDs and relationship type. Agent calls get_node_info per ID.
     const directCallers = callers.map((c) => ({
       id: c.id,
-      name: c.name,
-      flavor: c.flavor,
-      file: c.location.absPath,
-      line: c.location.line,
+      relation: "calls",
     }));
 
     const transitiveTrace = traceGraph(node_id, 5, "incoming");
@@ -318,7 +531,7 @@ server.tool(
               targetFlavor: node?.flavor ?? "unknown",
               directCallers,
               transitiveImpact: transitiveTrace.nodes.length,
-              affectedNodes: transitiveTrace.nodes,
+              affectedNodeIds: transitiveTrace.nodes,
               affectedFiles: [
                 ...new Set(
                   transitiveTrace.nodes
@@ -326,12 +539,295 @@ server.tool(
                     .filter(Boolean)
                 ),
               ],
+              _hint: "Call get_node_info on each ID to fetch its node_context for reasoning.",
             },
             null,
             2
           ),
         },
       ],
+    };
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// get_lifecycle_map — Fetch init/deinit lifecycle for a class/actor
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// get_lifecycle_map — Parse ini:/di: from node_context into a chronological timeline
+// ═══════════════════════════════════════════════════════════════════════════════
+
+server.tool(
+  "get_lifecycle_map",
+  {
+    node_id: z.string().describe("Object node ID (class/actor) to inspect lifecycle for"),
+  },
+  async ({ node_id }) => {
+    const node = findNode(node_id);
+    if (!node) {
+      return { content: [{ type: "text" as const, text: `Node not found: ${node_id}` }] };
+    }
+
+    const OBJECT_FLAVORS = new Set(["class", "struct", "enum", "actor", "protocol"]);
+    if (!OBJECT_FLAVORS.has(node.flavor)) {
+      return { content: [{ type: "text" as const, text: `Not an object node (flavor: ${node.flavor}).` }] };
+    }
+
+    // Parse ini: and di: phases from node_context
+    const ctx = node.node_context ?? "";
+    const iniMatch = ctx.match(/ini:([^|]+)/);
+    const diMatch = ctx.match(/di:([^|]+)/);
+
+    // Build chronological timeline by resolving index tags
+    const initTimeline: { step: number; tag: string; resolved: string; behavior: string }[] = [];
+    if (iniMatch) {
+      const iniRaw = iniMatch[1];
+      // Split by -> (sequence) and , (parallel)
+      const steps = iniRaw.split(/->/).map((s) => s.trim());
+      for (let s = 0; s < steps.length; s++) {
+        for (const part of steps[s].split(",")) {
+          const tagMatch = part.match(/([!?~>]*)i\[(\d+)\]/);
+          if (tagMatch) {
+            const idx = parseInt(tagMatch[2], 10);
+            const id = node.inits?.[idx];
+            const name = id ? (id.split("::").pop() ?? id) : `inits[${idx}]`;
+            const behavior = tagMatch[1] === "!" ? "mandatory" : tagMatch[1] === "?" ? "conditional" : "sequential";
+            initTimeline.push({ step: s, tag: part.trim(), resolved: name, behavior });
+          } else {
+            // Behavior descriptor (e.g., bind_obs, conn)
+            initTimeline.push({ step: s, tag: part.trim(), resolved: part.trim(), behavior: "side_effect" });
+          }
+        }
+      }
+    }
+
+    const deinitTimeline: { tag: string; resolved: string; behavior: string }[] = [];
+    if (diMatch) {
+      for (const part of diMatch[1].split(",")) {
+        const tagMatch = part.match(/([!?~>]*)di\[(\d+)\]/);
+        if (tagMatch) {
+          const idx = parseInt(tagMatch[2], 10);
+          const id = node.deinits?.[idx];
+          const name = id ? (id.split("::").pop() ?? id) : `deinits[${idx}]`;
+          deinitTimeline.push({ tag: part.trim(), resolved: name, behavior: tagMatch[1] === "!" ? "mandatory" : "sequential" });
+        } else {
+          deinitTimeline.push({ tag: part.trim(), resolved: part.trim(), behavior: "cleanup" });
+        }
+      }
+    }
+
+    // Accessors
+    const loader = getFragmentLoader();
+    const accessorIds: string[] = [];
+    if (loader) {
+      for (const child of loader.loadObject(node_id)) {
+        if (child.flavor === "variable" && child.id !== node_id) accessorIds.push(child.id);
+      }
+    }
+
+    return {
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({
+          node_id,
+          node_context: ctx || null,
+          resolved_context: ctx ? resolveIndexTags(ctx, node) : null,
+          lifecycle: {
+            init: { raw: iniMatch?.[1] ?? null, timeline: initTimeline },
+            deinit: { raw: diMatch?.[1] ?? null, timeline: deinitTimeline },
+          },
+          arrays: {
+            inits: node.inits ?? [],
+            deinits: node.deinits ?? [],
+            implements: node.implements ?? [],
+          },
+          accessorIds,
+        }, null, 2),
+      }],
+    };
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// resolve_node_logic — Resolve index tags into human/AI-readable logic flow
+// ═══════════════════════════════════════════════════════════════════════════════
+
+server.tool(
+  "resolve_node_logic",
+  {
+    node_id: z.string().describe("Node ID to resolve logic for"),
+  },
+  async ({ node_id }) => {
+    const node = findNode(node_id);
+    if (!node) {
+      return { content: [{ type: "text" as const, text: `Node not found: ${node_id}` }] };
+    }
+
+    if (!node.node_context) {
+      return { content: [{ type: "text" as const, text: JSON.stringify({ node_id, resolved: null, reason: "No node_context generated" }) }] };
+    }
+
+    const resolved = resolveIndexTags(node.node_context, node);
+
+    return {
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({
+          node_id,
+          raw_context: node.node_context,
+          resolved_context: resolved,
+        }, null, 2),
+      }],
+    };
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// trace_impact_chain — Scan callers' node_context for index refs to the target
+// ═══════════════════════════════════════════════════════════════════════════════
+
+server.tool(
+  "trace_impact_chain",
+  {
+    node_id: z.string().describe("Node ID to trace impact for — who references it and HOW"),
+  },
+  async ({ node_id }) => {
+    const node = findNode(node_id);
+    if (!node) {
+      return { content: [{ type: "text" as const, text: `Node not found: ${node_id}` }] };
+    }
+
+    const callers = findCallers(node_id);
+    const targetName = node_id.split("::").pop() ?? node_id;
+
+    // Scan each caller's node_context for index references that resolve to our target
+    const impacts: { caller_id: string; behavior: string; raw_ref: string; context_snippet: string }[] = [];
+
+    for (const caller of callers) {
+      if (!caller.node_context) {
+        impacts.push({ caller_id: caller.id, behavior: "unknown", raw_ref: "—", context_snippet: "no context" });
+        continue;
+      }
+
+      // Find which array and index points to our target
+      let foundRef: string | null = null;
+      let behavior = "calls";
+
+      // Check calls[] array
+      const callIdx = caller.calls?.indexOf(node_id) ?? -1;
+      if (callIdx >= 0) {
+        // Look for c[callIdx] in the caller's context
+        const refPattern = new RegExp(`([!?]|~>)?c\\[${callIdx}\\]`);
+        const match = caller.node_context.match(refPattern);
+        if (match) {
+          foundRef = match[0];
+          const prefix = match[1] ?? "";
+          behavior = prefix === "!" ? "mandatory" : prefix === "?" ? "conditional" : prefix === "~>" ? "async_side_effect" : "sequential";
+        } else {
+          foundRef = `c[${callIdx}]`;
+          behavior = "calls";
+        }
+      }
+
+      // Check inits[] array
+      if (!foundRef) {
+        const initIdx = caller.inits?.indexOf(node_id) ?? -1;
+        if (initIdx >= 0) {
+          const refPattern = new RegExp(`([!?])?i\\[${initIdx}\\]`);
+          const match = caller.node_context.match(refPattern);
+          foundRef = match ? match[0] : `i[${initIdx}]`;
+          behavior = match?.[1] === "!" ? "mandatory_init" : "init";
+        }
+      }
+
+      // Check deinits[] array
+      if (!foundRef) {
+        const diIdx = caller.deinits?.indexOf(node_id) ?? -1;
+        if (diIdx >= 0) {
+          foundRef = `di[${diIdx}]`;
+          behavior = "cleanup";
+        }
+      }
+
+      impacts.push({
+        caller_id: caller.id,
+        behavior,
+        raw_ref: foundRef ?? "—",
+        context_snippet: caller.node_context.slice(0, 80),
+      });
+    }
+
+    return {
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({
+          target: node_id,
+          targetName,
+          impactCount: impacts.length,
+          impacts,
+        }, null, 2),
+      }],
+    };
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// resolve_logic_chain — Follow parents→calls to explain a full business flow
+// ═══════════════════════════════════════════════════════════════════════════════
+
+server.tool(
+  "resolve_logic_chain",
+  {
+    start_node_id: z.string().describe("Starting node ID (e.g. a didSet variable or a function)"),
+    depth: z.number().default(4).describe("Max chain depth to follow (default 4)"),
+  },
+  async ({ start_node_id, depth }) => {
+    const startNode = findNode(start_node_id);
+    if (!startNode) {
+      return { content: [{ type: "text" as const, text: `Node not found: ${start_node_id}` }] };
+    }
+
+    const chain: { step: number; direction: string; id: string; resolved_context?: string }[] = [];
+    const visited = new Set<string>();
+
+    chain.push({ step: 0, direction: "start", id: startNode.id,
+      ...(startNode.node_context ? { resolved_context: resolveIndexTags(startNode.node_context, startNode) } : {}),
+    });
+    visited.add(startNode.id);
+
+    for (const pid of startNode.parents) {
+      if (visited.has(pid)) continue;
+      visited.add(pid);
+      const parent = findNode(pid);
+      if (parent) {
+        chain.push({ step: 0, direction: "parent", id: parent.id,
+          ...(parent.node_context ? { resolved_context: resolveIndexTags(parent.node_context, parent) } : {}),
+        });
+      }
+    }
+
+    let frontier = [...(startNode.calls ?? []), ...(startNode.inits ?? [])];
+    for (let d = 1; d <= depth && frontier.length > 0; d++) {
+      const nextFrontier: string[] = [];
+      for (const callId of frontier) {
+        if (visited.has(callId)) continue;
+        visited.add(callId);
+        const called = findNode(callId);
+        if (!called) continue;
+        chain.push({ step: d, direction: "calls", id: called.id,
+          ...(called.node_context ? { resolved_context: resolveIndexTags(called.node_context, called) } : {}),
+        });
+        nextFrontier.push(...(called.calls ?? []).slice(0, 3));
+      }
+      frontier = nextFrontier;
+    }
+
+    return {
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({ startNode: start_node_id, chainLength: chain.length, chain }, null, 2),
+      }],
     };
   }
 );
@@ -382,12 +878,11 @@ server.tool(
     query: z.string().describe("Natural language question about the codebase (e.g. 'How does article fetching work?')"),
     max_seeds: z.number().default(5).describe("Max seed nodes to discover"),
     depth: z.number().default(2).describe("Relationship expansion depth"),
+    full_source: z.boolean().default(false).describe("If true, return full node data instead of pre-digested node_context"),
   },
-  async ({ query, max_seeds, depth }) => {
-    const data = loadGraph();
-    if (data.nodes.length === 0) {
-      return { content: [{ type: "text" as const, text: "No graph data loaded." }] };
-    }
+  async ({ query, max_seeds, depth, full_source }) => {
+    // ── Phase 0: Ensure fragments or load monolithic ──
+    const loader = ensureFragments();
 
     const queryTokens = query
       .toLowerCase()
@@ -395,7 +890,10 @@ server.tool(
       .split(/\s+/)
       .filter((t) => t.length > 2);
 
-    const scored = data.nodes.map((node) => {
+    // ── Phase 1: Seed discovery (scan fragments one-at-a-time) ──
+    const scored: { node: GraphNode; score: number }[] = [];
+
+    function scoreNode(node: GraphNode): number {
       let score = 0;
       const haystack = `${node.id} ${node.name} ${node.flavor}`.toLowerCase();
       for (const token of queryTokens) {
@@ -405,11 +903,28 @@ server.tool(
       }
       if (node.flavor === "class" || node.flavor === "struct" || node.flavor === "protocol") score += 3;
       if (node.flavor === "function" && (node.calls?.length ?? 0) > 0) score += 2;
-      return { node, score };
-    });
+      return score;
+    }
+
+    if (loader) {
+      // Fragment mode: scan each file individually, score, discard
+      loader.forEachFragment((nodes) => {
+        for (const node of nodes) {
+          const s = scoreNode(node);
+          if (s > 0) scored.push({ node, score: s });
+        }
+      });
+    } else {
+      // Monolithic fallback
+      const data = loadGraph();
+      if (!data || data.nodes.length === 0) return notConfiguredResponse();
+      for (const node of data.nodes) {
+        const s = scoreNode(node);
+        if (s > 0) scored.push({ node, score: s });
+      }
+    }
 
     const seeds = scored
-      .filter((s) => s.score > 0)
       .sort((a, b) => b.score - a.score)
       .slice(0, max_seeds)
       .map((s) => s.node);
@@ -418,94 +933,84 @@ server.tool(
       return {
         content: [{
           type: "text" as const,
-          text: JSON.stringify({ error: "No relevant nodes found for query", query, totalNodes: data.nodes.length }),
+          text: JSON.stringify({ error: "No relevant nodes found for query", query }),
         }],
       };
     }
 
-    const primaryIds = new Set<string>();
-    const relationshipIds = new Set<string>();
-    const nodeById = new Map(data.nodes.map((n) => [n.id, n]));
+    // ── Phase 2: Stitch subgraph from seeds ──
+    const seedIds = seeds.map((s) => s.id);
 
+    let stitchedNodes: GraphNode[];
+    let missingRefs: string[] = [];
+
+    if (loader) {
+      // Fragment mode: stitch loads only needed files + shared globals
+      const stitched = loader.stitch(seedIds, depth);
+      stitchedNodes = stitched.nodes;
+      missingRefs = stitched.missing;
+    } else {
+      // Monolithic fallback: BFS expansion in memory
+      const data = loadGraph();
+      if (!data) return notConfiguredResponse();
+      const nodeById = new Map(data.nodes.map((n) => [n.id, n]));
+
+      const collected = new Set<string>();
+      let frontier = new Set(seedIds);
+      for (let d = 0; d <= depth; d++) {
+        const next = new Set<string>();
+        for (const id of frontier) {
+          if (collected.has(id)) continue;
+          collected.add(id);
+          const node = nodeById.get(id);
+          if (!node) { missingRefs.push(id); continue; }
+          for (const ref of [...(node.calls ?? []), ...(node.inits ?? []), ...(node.stores ?? [])]) {
+            if (!collected.has(ref)) next.add(ref);
+          }
+          for (const p of node.parents) {
+            if (p.includes("::") && !collected.has(p)) next.add(p);
+          }
+        }
+        frontier = next;
+      }
+      stitchedNodes = data.nodes.filter((n) => collected.has(n.id));
+    }
+
+    // ── Phase 3: Classify into primary / relationship / shared ──
+    const nodeById = new Map(stitchedNodes.map((n) => [n.id, n]));
+    // Primary = seeds + their direct parents/calls
+    const primaryIds = new Set(seedIds);
     for (const seed of seeds) {
-      primaryIds.add(seed.id);
-      for (const p of seed.parents) {
-        const parent = nodeById.get(p);
-        if (parent) primaryIds.add(parent.id);
-      }
-      for (const call of seed.calls ?? []) primaryIds.add(call);
-      for (const init of seed.inits ?? []) primaryIds.add(init);
+      for (const p of seed.parents) if (nodeById.has(p)) primaryIds.add(p);
+      for (const c of seed.calls ?? []) if (nodeById.has(c)) primaryIds.add(c);
+      for (const i of seed.inits ?? []) if (nodeById.has(i)) primaryIds.add(i);
     }
 
-    function expand(ids: Set<string>, d: number) {
-      if (d <= 0) return;
-      const newIds: string[] = [];
-      for (const id of ids) {
-        const node = nodeById.get(id);
-        if (!node) continue;
-        for (const call of node.calls ?? []) {
-          if (!ids.has(call) && !primaryIds.has(call)) newIds.push(call);
-        }
-        for (const caller of findCallers(id)) {
-          if (!ids.has(caller.id) && !primaryIds.has(caller.id)) newIds.push(caller.id);
-        }
-      }
-      for (const id of newIds) relationshipIds.add(id);
-      expand(relationshipIds, d - 1);
-    }
-    expand(primaryIds, depth);
-
+    // Shared = targets + multi-referenced
     const sharedIds = new Set<string>();
-    const allReferencedIds = new Set<string>();
-
-    for (const id of [...primaryIds, ...relationshipIds]) {
-      const node = nodeById.get(id);
-      if (!node) continue;
+    const refCounts = new Map<string, number>();
+    for (const node of stitchedNodes) {
+      if (node.flavor === "target") { sharedIds.add(node.id); continue; }
       for (const ref of [...(node.calls ?? []), ...(node.inits ?? []), ...(node.stores ?? [])]) {
-        if (allReferencedIds.has(ref)) {
-          sharedIds.add(ref);
-        } else {
-          allReferencedIds.add(ref);
-        }
+        refCounts.set(ref, (refCounts.get(ref) ?? 0) + 1);
       }
     }
-
-    for (const id of [...primaryIds, ...relationshipIds]) {
-      const node = nodeById.get(id);
-      if (node?.flavor === "target") sharedIds.add(id);
+    for (const [ref, count] of refCounts) {
+      if (count >= 2 && nodeById.has(ref)) sharedIds.add(ref);
     }
 
     function toFragment(id: string) {
-      const node = nodeById.get(id);
-      if (!node) return { id, name: id, flavor: "unknown" };
-      return {
-        id: node.id,
-        name: node.name,
-        flavor: node.flavor,
-        parents: node.parents,
-        calls: node.calls,
-        returns: node.returns,
-        parameters: node.parameters,
-        location: node.location,
-      };
+      return toTokenOptimizedFragment(id, nodeById, full_source);
     }
 
+    const relationshipIds = new Set(
+      stitchedNodes.map((n) => n.id).filter((id) => !primaryIds.has(id) && !sharedIds.has(id))
+    );
+
     const result = [
-      {
-        type: "primary",
-        description: "Seed nodes directly relevant to the query and their immediate connections",
-        data: [...primaryIds].map(toFragment),
-      },
-      {
-        type: "relationship",
-        description: `Extended execution paths (depth ${depth}) from seed nodes`,
-        data: [...relationshipIds].filter((id) => !primaryIds.has(id)).map(toFragment),
-      },
-      {
-        type: "shared",
-        description: "Nodes referenced by multiple fragments (targets, singletons, shared utilities)",
-        data: [...sharedIds].map(toFragment),
-      },
+      { type: "primary", description: "Seed nodes and immediate connections", data: [...primaryIds].map(toFragment) },
+      { type: "relationship", description: `Extended paths (depth ${depth})`, data: [...relationshipIds].map(toFragment) },
+      { type: "shared", description: "Bridge nodes referenced by multiple fragments + targets", data: [...sharedIds].map(toFragment) },
     ];
 
     return {
@@ -513,15 +1018,12 @@ server.tool(
         type: "text" as const,
         text: JSON.stringify({
           query,
+          mode: loader ? "fragmented" : "monolithic",
           seedCount: seeds.length,
           seeds: seeds.map((s) => ({ id: s.id, name: s.name, flavor: s.flavor })),
           fragments: result,
-          stats: {
-            primary: result[0].data.length,
-            relationship: result[1].data.length,
-            shared: result[2].data.length,
-            total: result[0].data.length + result[1].data.length + result[2].data.length,
-          },
+          stats: { primary: result[0].data.length, relationship: result[1].data.length, shared: result[2].data.length, total: result[0].data.length + result[1].data.length + result[2].data.length },
+          ...(missingRefs.length > 0 ? { missingFragments: missingRefs } : {}),
         }, null, 2),
       }],
     };
@@ -536,8 +1038,9 @@ server.tool(
     depth: z.number().default(2).describe("Dependency expansion depth"),
   },
   async ({ query, max_seeds, depth }) => {
-    const { generateSubGraph } = await import("./subgraph-agent.js");
     const paths = resolveProjectPaths();
+    if (!paths) return notConfiguredResponse();
+    const { generateSubGraph } = await import("./subgraph-agent.js");
     const outputBase = paths.contextsDir;
     const result = generateSubGraph(paths.graphPath, query, outputBase, max_seeds, depth);
     return {
@@ -556,16 +1059,9 @@ server.tool(
     fragment_type: z.enum(["primary", "dependency", "shared", "all"]).default("primary").describe("Which fragment to load"),
   },
   async ({ query_id, fragment_type }) => {
-    let paths: ProjectPaths;
-    try {
-      paths = resolveProjectPaths();
-    } catch {
-      return {
-        content: [{
-          type: "text" as const,
-          text: "Please run ./run.sh in the project root to initialize the context fragments.",
-        }],
-      };
+    const paths = resolveProjectPaths();
+    if (!paths) {
+      return notConfiguredResponse();
     }
 
     const contextsDir = paths.contextsDir;
@@ -638,20 +1134,46 @@ server.tool(
 );
 
 async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-
+  // CRITICAL: Never call process.exit(). The server must stay alive
+  // to keep the MCP connection green, even if data is missing.
   try {
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+
+    const mode = STEALTH_MODE ? "stealth" : "standard";
+    console.error(`[SwiftPrism MCP] Connected (mode: ${mode})`);
+
     const paths = resolveProjectPaths();
-    fs.watch(path.dirname(paths.graphPath), (event, filename) => {
-      if (filename === path.basename(paths.graphPath)) {
-        console.error("[SwiftPrism MCP] Graph file changed — next request will reload.");
+    if (paths) {
+      // Auto-fragment at startup if monolithic graph exists but fragments don't
+      const loader = ensureFragments();
+      if (loader) {
+        const stats = loader.getStats();
+        console.error(`[SwiftPrism MCP] Fragments ready: ${stats?.nodeCount ?? "?"} nodes in ${stats?.fragmentCount ?? "?"} files`);
       }
-    });
-    console.error(`[SwiftPrism MCP] Watching: ${paths.graphPath}`);
-  } catch {
-    console.error("[SwiftPrism MCP] No graph data yet. Run ./run.sh in the project root to generate.");
+
+      try {
+        fs.watch(path.dirname(paths.graphPath), (_event: string, filename: string | null) => {
+          if (filename === path.basename(paths!.graphPath)) {
+            console.error("[SwiftPrism MCP] Graph file changed — re-fragmenting...");
+            ensureFragments()?.invalidate();
+          }
+        });
+        console.error(`[SwiftPrism MCP] Watching: ${paths.graphPath}`);
+      } catch {
+        console.error("[SwiftPrism MCP] Could not watch graph file (non-fatal).");
+      }
+    } else {
+      console.error("[SwiftPrism MCP] No graph data found. Tools will return guidance when called.");
+      console.error("[SwiftPrism MCP] Run ./run.sh in the project root to generate data.");
+    }
+  } catch (err) {
+    // Log but do NOT exit — keep the process alive for reconnection attempts
+    console.error("[SwiftPrism MCP] Initialization error (non-fatal):", err);
   }
 }
 
-main().catch(console.error);
+main().catch((err) => {
+  // Last resort — log but never exit
+  console.error("[SwiftPrism MCP] Fatal startup error:", err);
+});

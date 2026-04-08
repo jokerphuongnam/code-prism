@@ -68,6 +68,7 @@ export type TargetType =
   | "plugin"
   | "unknown";
 
+// TODO: Potential Redundant — MacroType not currently referenced
 export type MacroType = "attached" | "freestanding";
 
 export interface SourceLocation {
@@ -114,6 +115,7 @@ export interface TargetInfo {
   dependencies: string[];
 }
 
+// TODO: Potential Redundant — MacroNode not currently referenced
 export interface MacroNode {
   id: string;
   name: string;
@@ -142,6 +144,7 @@ export interface PrismLink {
   targetSignature?: string | null;
 }
 
+// TODO: Potential Redundant — ModuleNode not currently referenced
 export interface ModuleNode {
   id: string;
   name: string;
@@ -170,6 +173,7 @@ export type AnalysisPhase =
   | "resolving"
   | "encoding"
   | "streaming"
+  | "semantic_context"
   | "complete"
   | "error";
 
@@ -187,10 +191,12 @@ export interface SourcePosition {
   absPath: string;
 }
 
+// TODO: Potential Redundant — ObjectLocation not currently referenced
 export interface ObjectLocation extends SourcePosition {
   type: "primary" | "extension";
 }
 
+// TODO: Potential Redundant — ExecutionBlockKind not currently referenced
 export type ExecutionBlockKind =
   | "func"
   | "init"

@@ -767,6 +767,7 @@ export function runAnalyzer(
   return { promise, process: child };
 }
 
+// TODO: Potential Redundant — runFlatAnalysis not currently imported by any consumer
 export function runFlatAnalysis(
   binaryPath: string,
   args: string[],

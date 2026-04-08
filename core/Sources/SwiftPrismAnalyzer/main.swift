@@ -96,7 +96,20 @@ func runDirectScan(_ mode: RunMode) throws {
     )
     let result = depResolver.resolve()
 
-    let flatEntries = convertToFlatMap(result, fileImportsMap: fileImports, extensionLocations: extLocs)
+    var flatEntries = convertToFlatMap(result, fileImportsMap: fileImports, extensionLocations: extLocs)
+
+    // ── Semantic Context Enrichment ──
+    // Generate token-optimized contexts for each eligible node via local LLM or fallback.
+    // Cache directory defaults to .swiftprism next to the output file.
+    let semanticCacheDir = ((outputPath as NSString).deletingLastPathComponent as NSString)
+        .appendingPathComponent(".swiftprism")
+    emitProgress(phase: "semantic_context", processed: 0, total: flatEntries.count)
+    let semanticGen = SemanticContextGenerator(
+        fileSources: fileSources, cacheDir: semanticCacheDir
+    )
+    let semanticStats = semanticGen.enrich(&flatEntries)
+    emitProgress(phase: "semantic_context", processed: flatEntries.count, total: flatEntries.count)
+    fputs("{\"_info\":\"Semantic context: \(semanticStats.generated) generated, \(semanticStats.cached) cached, LLM: \(semanticStats.llmUsed)\"}\n", stderr)
 
     let json = try safeEncodeToJSON(flatEntries, label: "FlatMapEntry")
 

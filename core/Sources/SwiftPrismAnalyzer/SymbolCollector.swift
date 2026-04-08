@@ -248,7 +248,7 @@ final class SymbolCollector: SyntaxVisitor {
             let kind = accessor.accessorSpecifier.text
             guard kind == "willSet" || kind == "didSet" else { continue }
             let subKind: SymbolSubKind = kind == "willSet" ? .willSet : .didSet
-            let name = "\(varName).\(kind)"
+            let name = "\(varName)[\(kind)]"
             let id = makeID(parent: parent, name: name)
             let loc = sourceLocation(of: accessor)
             symbols.append(SymbolInfo(id: id, name: name, flavor: .variable, subKind: subKind, isStatic: isStatic, isGlobal: isGlobal, isNested: false, isInteresting: true, resolvedType: nil, parentFile: isGlobal ? fileName : nil, sourceFile: fileName, access: access, parent: parent, location: loc, signature: nil, isProtocolRequirement: false, returnTypes: nil, parameterTypes: varType))

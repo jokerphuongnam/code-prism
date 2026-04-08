@@ -5,6 +5,7 @@ import type {
   ProgressInfo,
   FlatMapEntry,
   FilePreview,
+  SemanticContextProgress,
 } from "./protocol";
 import { useVscodeMessaging, usePostMessage } from "./hooks/useVscodeMessaging";
 import { Header } from "./components/Header";
@@ -92,6 +93,9 @@ export function App() {
   const [contextToast, setContextToast] = useState<string | null>(null);
   const [jsonLoading, setJsonLoading] = useState(false);
   const [filePreview, setFilePreview] = useState<FilePreview | null>(null);
+  const [semanticProgress, setSemanticProgress] = useState<SemanticContextProgress | null>(null);
+  const [pendingContextIds, setPendingContextIds] = useState<Set<string>>(new Set());
+  const [nodeContextMap, setNodeContextMap] = useState<Map<string, string>>(new Map());
   const postMessage = usePostMessage();
 
   const lkgResult = useRef<AnalysisResult | null>(null);
@@ -163,6 +167,31 @@ export function App() {
         setContextToast(`Context copied (~${msg.tokenEstimate} tokens)`);
         setTimeout(() => setContextToast(null), 3000);
         break;
+      case "semanticContextProgress":
+        setSemanticProgress(msg.progress);
+        break;
+      case "semanticContextComplete":
+        setSemanticProgress(null);
+        setPendingContextIds(new Set());
+        setContextToast(
+          `Context: ${msg.enrichedCount} generated, ${msg.cachedCount} cached` +
+          (msg.llmUsed ? " (LLM)" : " (fallback)")
+        );
+        setTimeout(() => setContextToast(null), 4000);
+        break;
+      case "nodeContextUpdate":
+        // Single node finished — remove from pending, add to context map
+        setPendingContextIds((prev) => {
+          const next = new Set(prev);
+          next.delete(msg.nodeId);
+          return next;
+        });
+        setNodeContextMap((prev) => new Map(prev).set(msg.nodeId, msg.context));
+        break;
+      case "pendingContextIds":
+        setPendingContextIds(new Set(msg.nodeIds));
+        if (msg.nodeIds.length === 0) setNodeContextMap(new Map());
+        break;
     }
   }, []);
 
@@ -221,6 +250,13 @@ export function App() {
   return (
     <div style={styles.root}>
       {error && <div style={styles.error}>{error}</div>}
+      {semanticProgress && (
+        <div style={styles.toast}>
+          Processing Context... {semanticProgress.completed}/{semanticProgress.total}
+          {semanticProgress.cached > 0 && ` (${semanticProgress.cached} cached)`}
+          {semanticProgress.llmUsed ? " [LLM]" : " [fallback]"}
+        </div>
+      )}
       {contextToast && <div style={styles.toast}>{contextToast}</div>}
       <main style={styles.main}>
         {activeTab === "graph" && (
@@ -233,6 +269,8 @@ export function App() {
             onRequestFilePreview={handleRequestFilePreview}
             onClearPreview={handleClearPreview}
             filePreview={filePreview}
+            pendingContextIds={pendingContextIds}
+            nodeContextMap={nodeContextMap}
           />
         )}
         {activeTab === "json" && <JsonPreview result={displayResult} />}

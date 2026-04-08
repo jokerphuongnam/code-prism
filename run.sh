@@ -34,6 +34,7 @@ run_clean() {
     rm -rf extension/dist-webview
     rm -rf extension/dist
     rm -f prism-context.json
+    rm -rf .swiftprism
     print_done "All build artifacts removed"
 
     if docker_available; then
@@ -117,13 +118,25 @@ build_mcp_server() {
     cd ..
 
     print_step "Writing shared config"
-    cat > swiftprism-config.json <<CFGEOF
+    local PROJECT_ROOT
+    PROJECT_ROOT="$(cd .. && pwd)"
+    local HIDDEN_DIR="$PROJECT_ROOT/.swiftprism"
+    mkdir -p "$HIDDEN_DIR"
+    if [ ! -f "$HIDDEN_DIR/.gitignore" ]; then
+        printf "*\n" > "$HIDDEN_DIR/.gitignore"
+    fi
+
+    cat > "$HIDDEN_DIR/swiftprism-config.json" <<CFGEOF
 {
-  "graphPath": "$(pwd)/extension/out/prism-context.json",
-  "mcpServer": "$(pwd)/mcp-server/dist/server.js",
-  "extensionBin": "$(pwd)/extension/bin/swift-prism-analyzer"
+  "graphPath": "$HIDDEN_DIR/prism-context.json",
+  "contextsDir": "$HIDDEN_DIR/contexts",
+  "mcpServer": "$PROJECT_ROOT/mcp-server/dist/server.js",
+  "extensionBin": "$PROJECT_ROOT/extension/bin/swift-prism-analyzer"
 }
 CFGEOF
+
+    # Remove legacy root-level config
+    rm -f "$PROJECT_ROOT/swiftprism-config.json"
 
     chmod +x dist/server.js
     cd ..
@@ -223,9 +236,16 @@ verify_binary() {
 }
 
 generate_context() {
-    print_step "Detecting project type and generating prism-context.json"
+    print_step "Detecting project type and generating context data"
     local WORKSPACE_ROOT="${1:-$SCRIPT_DIR}"
-    local CONTEXT_OUT="$WORKSPACE_ROOT/prism-context.json"
+    local HIDDEN_DIR="$WORKSPACE_ROOT/.swiftprism"
+    local CONTEXT_OUT="$HIDDEN_DIR/prism-context.json"
+
+    # Create hidden directory with gitignore
+    mkdir -p "$HIDDEN_DIR"
+    if [ ! -f "$HIDDEN_DIR/.gitignore" ]; then
+        printf "*\n" > "$HIDDEN_DIR/.gitignore"
+    fi
 
     if [ -f "$WORKSPACE_ROOT/Package.swift" ]; then
         printf "  Project type: \033[1mSwift Package\033[0m\n"
@@ -243,15 +263,50 @@ generate_context() {
         -not -path "*/node_modules/*" \
         -not -path "*/.git/*" \
         -not -path "*/Carthage/*" \
+        -not -path "*/.swiftprism/*" \
         2>/dev/null || true)
 
     if [ -n "$SWIFT_FILES" ] && [ -x "$BIN_TARGET" ]; then
         local FLAGS="--workspace $WORKSPACE_ROOT --scan-targets --public-only-external --context --output $CONTEXT_OUT"
         $BIN_TARGET $FLAGS $SWIFT_FILES 2>/dev/null && \
-            print_done "prism-context.json written to $CONTEXT_OUT" || \
+            print_done "prism-context.json → $HIDDEN_DIR/" || \
             print_warn "Context generation skipped (non-critical)"
     else
         print_warn "Skipped context generation (no .swift files or binary not executable)"
+    fi
+
+    # Clean up legacy root-level file if it exists
+    if [ -f "$WORKSPACE_ROOT/prism-context.json" ]; then
+        mv "$WORKSPACE_ROOT/prism-context.json" "$CONTEXT_OUT" 2>/dev/null || true
+        print_done "Migrated legacy prism-context.json → .swiftprism/"
+    fi
+
+    # Generate token-optimized node contexts via local LLM (or deterministic fallback)
+    if [ -f "$CONTEXT_OUT" ] && [ -f "$SCRIPT_DIR/mcp-server/dist/node-context-generator.js" ]; then
+        print_step "Generating node_context (LLM pre-digestion)"
+        local OLLAMA_MODEL="${OLLAMA_MODEL:-codellama}"
+        node -e "
+          import('$SCRIPT_DIR/mcp-server/dist/node-context-generator.js').then(m => {
+            m.generateNodeContexts('$CONTEXT_OUT', '$HIDDEN_DIR', { ollamaModel: '$OLLAMA_MODEL' })
+              .then(r => console.log('Context: ' + r.generated + ' generated, ' + r.cached + ' cached (LLM: ' + r.usedLLM + ')'))
+              .catch(e => console.error('Context generation skipped:', e.message));
+          }).catch(e => console.error('Context module load failed:', e.message));
+        " 2>/dev/null && \
+            print_done "Node contexts enriched → $CONTEXT_OUT" || \
+            print_warn "Node context generation skipped (non-critical)"
+    fi
+
+    # Auto-fragment for MCP on-demand loading
+    if [ -f "$CONTEXT_OUT" ] && [ -f "$SCRIPT_DIR/mcp-server/dist/fragment-store.js" ]; then
+        print_step "Fragmenting graph for on-demand MCP loading"
+        node -e "
+          import('$SCRIPT_DIR/mcp-server/dist/fragment-store.js').then(m => {
+            const idx = m.fragmentGraph('$CONTEXT_OUT', '$HIDDEN_DIR');
+            console.log('Fragmented: ' + idx.nodeCount + ' nodes → ' + idx.fragmentCount + ' files');
+          }).catch(e => console.error('Fragmentation skipped:', e.message));
+        " 2>/dev/null && \
+            print_done "Fragments written → $HIDDEN_DIR/fragments/" || \
+            print_warn "Fragmentation skipped (non-critical)"
     fi
 }
 
