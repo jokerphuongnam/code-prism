@@ -24,6 +24,10 @@ interface GraphViewProps {
   onRequestFilePreview?: (nodeId: string, filePath: string) => void;
   onClearPreview?: () => void;
   filePreview?: FilePreview | null;
+  /** Node IDs currently awaiting semantic context from the LLM */
+  pendingContextIds?: Set<string>;
+  /** Resolved semantic contexts keyed by node ID */
+  nodeContextMap?: Map<string, string>;
 }
 
 interface GraphNode {
@@ -733,7 +737,7 @@ function FilterPanel({
   );
 }
 
-export function GraphView({ result, highlightedIds = new Set(), onCopyContext, onOpenFile, onRequestMembers, onRequestFilePreview, onClearPreview, filePreview }: GraphViewProps) {
+export function GraphView({ result, highlightedIds = new Set(), onCopyContext, onOpenFile, onRequestMembers, onRequestFilePreview, onClearPreview, filePreview, pendingContextIds = new Set(), nodeContextMap = new Map() }: GraphViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<ForceGraph3DInstance | null>(null);
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
@@ -753,6 +757,8 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
     targetName: string | null;
     locations?: { file: string; line: number; column: number }[];
     origin?: string;
+    semanticContext?: string | null;
+    contextPending?: boolean;
   } | null>(null);
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -993,6 +999,8 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
           targetName: n.targetName,
           locations: prismNode?.locations,
           origin: prismNode?.origin,
+          semanticContext: nodeContextMap.get(n.id) ?? null,
+          contextPending: pendingContextIds.has(n.id),
         });
         hoverTimerRef.current = setTimeout(() => {
           if (n.location.file && onRequestFilePreview) {
@@ -1310,6 +1318,63 @@ export function GraphView({ result, highlightedIds = new Set(), onCopyContext, o
       }, 500);
     }
   }, [graphData]);
+
+  // ── "Thinking..." ring on nodes awaiting semantic context ──
+  // Adds a pulsing cyan ring overlay on each pending node's THREE.Group.
+  // When the node's context arrives, the ring is removed automatically.
+  const thinkingRingsRef = useRef<Map<string, THREE.Sprite>>(new Map());
+  useEffect(() => {
+    const graph = graphRef.current;
+    if (!graph) return;
+    const data = graph.graphData();
+    const nodes = data.nodes as GraphNode[];
+    const rings = thinkingRingsRef.current;
+
+    // Remove rings for nodes no longer pending
+    for (const [id, ring] of rings) {
+      if (!pendingContextIds.has(id)) {
+        ring.parent?.remove(ring);
+        ring.material.dispose();
+        if (ring.material.map) ring.material.map.dispose();
+        rings.delete(id);
+      }
+    }
+
+    // Add rings for newly pending nodes
+    for (const node of nodes) {
+      if (!pendingContextIds.has(node.id)) continue;
+      if (rings.has(node.id)) continue;
+      const group = node.__threeObj as THREE.Group | undefined;
+      if (!group) continue;
+
+      const canvas = document.createElement("canvas");
+      canvas.width = 64;
+      canvas.height = 64;
+      const ctx = canvas.getContext("2d")!;
+      // Pulsing cyan ring
+      ctx.beginPath();
+      ctx.arc(32, 32, 24, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(0, 230, 255, 0.6)";
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      // Small inner dots to suggest "thinking"
+      for (let angle = 0; angle < Math.PI * 2; angle += Math.PI / 2) {
+        ctx.beginPath();
+        ctx.arc(32 + Math.cos(angle) * 18, 32 + Math.sin(angle) * 18, 2, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(0, 230, 255, 0.8)";
+        ctx.fill();
+      }
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.minFilter = THREE.LinearFilter;
+      const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, sizeAttenuation: true });
+      const ring = new THREE.Sprite(mat);
+      const baseScale = group.userData?.baseScale ?? 6;
+      ring.scale.set(baseScale * 2.2, baseScale * 2.2, 1);
+      ring.userData.__thinkingRing = true;
+      group.add(ring);
+      rings.set(node.id, ring);
+    }
+  }, [pendingContextIds]);
 
   useEffect(() => {
     const MOVE_SPEED = 3;

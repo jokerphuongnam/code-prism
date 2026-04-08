@@ -28,6 +28,10 @@ export interface HoveredNodeInfo {
   locations?: { file: string; line: number; column: number }[];
   /** Target-only: origin path/URL */
   origin?: string;
+  /** Token-optimized semantic context from local LLM or fallback */
+  semanticContext?: string | null;
+  /** Whether this node is still awaiting context generation */
+  contextPending?: boolean;
 }
 
 interface NodeDetailCardProps {
@@ -417,6 +421,28 @@ export function NodeDetailCard({
                 </div>
               </div>
             </div>
+
+            {/* ─── Semantic Context (AI Summary) ─── */}
+            {node.contextPending && (
+              <div style={{ padding: "4px 12px", fontSize: "0.78em", opacity: 0.5, fontStyle: "italic" }}>
+                Thinking...
+              </div>
+            )}
+            {!node.contextPending && node.semanticContext && (
+              <div style={{
+                padding: "4px 12px",
+                fontSize: "0.78em",
+                fontFamily: "monospace",
+                color: "rgba(0, 230, 255, 0.85)",
+                background: "rgba(0, 230, 255, 0.06)",
+                borderTop: "1px solid rgba(0, 230, 255, 0.15)",
+                borderBottom: "1px solid rgba(0, 230, 255, 0.15)",
+                wordBreak: "break-all",
+                lineHeight: 1.4,
+              }}>
+                {node.semanticContext}
+              </div>
+            )}
 
             {/* ─── Body: Deep Inspector ─── */}
             <div style={cardStyles.body}>

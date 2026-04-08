@@ -27,45 +27,35 @@ Identifies `@attached` and `@freestanding` macro definitions, infers their roles
 
 ## 🏗️ Architecture
 
-SwiftPrism follows a **decoupled monorepo** architecture with two independent subsystems that communicate via JSON over STDIO.
+SwiftPrism follows a **three-layer** architecture: Swift AST analysis, VS Code 3D visualization, and MCP-based AI graph access.
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         VS Code Extension Host                   │
-│                                                                   │
-│   extension.ts ─── analyzerBridge.ts ─── explorerViewProvider.ts │
-│        │                   │                      │               │
-│   registers            spawns                  serves             │
-│   commands          background               React bundle         │
-│                      process                                      │
-│        │                   │                      │               │
-│   ┌────▼───────────────────▼──────────────────────▼────┐         │
-│   │              child_process.spawn                    │         │
-│   │    ┌──────────────────────────────────────────┐     │         │
-│   │    │         swift-prism-analyzer              │     │         │
-│   │    │         (Background Worker)               │     │         │
-│   │    │                                           │     │         │
-│   │    │  STDOUT ──► JSON AnalysisResult           │     │         │
-│   │    │  STDERR ──► Progress / Warnings           │     │         │
-│   │    └──────────────────────────────────────────┘     │         │
-│   └─────────────────────────────────────────────────────┘         │
-│                              │                                    │
-│                     webview.postMessage                           │
-│                              │                                    │
-│   ┌──────────────────────────▼─────────────────────────────┐     │
-│   │                  React Webview (Vite)                    │     │
-│   │                                                          │     │
-│   │   Header ─── GraphView (3d-force-graph) ─── StatusBar   │     │
-│   │                   │                                      │     │
-│   │              Three.js                                    │     │
-│   │           custom shapes                                  │     │
-│   │                                                          │     │
-│   │   GuideView ─── JsonPreview ─── ContextExport            │     │
-│   └──────────────────────────────────────────────────────────┘     │
-└─────────────────────────────────────────────────────────────────┘
+swift-prism/
+  core/             Swift CLI — SwiftSyntax two-pass analysis
+  extension/        VS Code — React + Three.js 3D webview
+  mcp-server/       MCP Server — fragmented graph access for Claude
+  .swiftprism/      Hidden data (auto-generated, gitignored)
+    fragments/        Per-object JSON files for on-demand loading
+    graph-index.json  Lightweight { nodeId → fragmentFile } map
+    _targets.json     Target hub nodes (UIKit, Foundation, etc.)
+    _shared.json      Bridge nodes referenced by 2+ logic flows
 ```
 
-**Multi-Process Execution** — The heavy AST parsing runs in a spawned Swift process (`child_process.spawn`), keeping VS Code's UI thread completely free. STDOUT delivers the final JSON payload. STDERR streams real-time progress updates that drive the animated status bar. If the analyzer crashes, the React webview retains the Last Known Good (LKG) result.
+### Execution-First Model
+
+Only code with executable bodies becomes a graph node. Stored properties (`var name: String`) are forbidden from the graph — they exist only as `stores` metadata on their parent Object. This reduces node count by ~46% while preserving all dependency information.
+
+### Stealth Dynamic Subgraph Extraction
+
+The MCP server fragments the full graph into per-object files inside `.swiftprism/fragments/`. When Claude queries a subgraph, only the relevant fragments are loaded and stitched via reference-ID pointers. Multi-referenced nodes (used by 2+ logic flows) are automatically promoted to a shared bridge file. Nothing persists in server memory between requests.
+
+### Target Hub System
+
+Every imported framework and internal target becomes a hub node with origin metadata:
+- **Apple SDK** (`"Apple"`) — UIKit, SwiftUI, Foundation
+- **Remote Git** (`"https://..."`) — resolved from Package.resolved
+- **Local External** (`"/path/..."`) — local SPM packages
+- **Internal** (no origin) — managed by GLOBAL::MAIN entry points
 
 ---
 
@@ -73,50 +63,55 @@ SwiftPrism follows a **decoupled monorepo** architecture with two independent su
 
 | Layer | Technology |
 |---|---|
-| **Static Analysis Engine** | Swift 5.10+, SwiftSyntax 510, SwiftParser |
+| **Static Analysis** | Swift 5.10+, SwiftSyntax 510, SwiftParser |
 | **Extension Host** | TypeScript, VS Code Extension API |
-| **3D Visualization** | React 18, Three.js, 3d-force-graph, Vite |
-| **Build Tooling** | SPM, npm, tsc, Vite |
-| **Infrastructure** | Docker (multi-stage), docker-compose, Shell |
-| **Project Detection** | Package.swift AST parsing, directory heuristics |
+| **3D Visualization** | React 18, Three.js, 3d-force-graph, Framer Motion, Vite |
+| **MCP Server** | TypeScript, `@modelcontextprotocol/sdk`, fragmented load-on-demand |
+| **Graph Capabilities** | Dynamic subgraph extraction, impact analysis, stealth file management |
+| **Build Tooling** | SPM, npm, tsc, Vite, Docker (multi-stage) |
+| **Project Detection** | Package.swift AST parsing, .xcodeproj, Package.resolved |
 
 ---
 
 ## 🚀 Getting Started
 
-### Option A: One-Click Build
+### One-Click Build
 
 ```bash
 git clone <repo-url> && cd swift-prism
 ./run.sh
 ```
 
-This single command:
-1. Builds the Swift analyzer in a Docker container (`swift:5.10-jammy`)
-2. Compiles the TypeScript extension and React webview
-3. Extracts the binary and bundles to your local filesystem
-4. Auto-detects your project type (SPM / Xcode / Standalone)
-5. Generates `prism-context.json` for AI agent consumption
-6. Prints launch instructions
+This builds the Swift analyzer, TypeScript extension, MCP server, and generates fragmented graph data inside `.swiftprism/`. Press **F5** in VS Code to launch.
 
-Then press **F5** in VS Code to start the extension.
+### Connect Claude via MCP
 
-### Option B: Dev Containers
+```bash
+# Global install + Claude Desktop registration
+cd mcp-server && npm link
+npx @anthropic-ai/claude-code mcp add swiftprism -- swift-prism-mcp
+```
 
-1. Install the **Dev Containers** extension
-2. **Cmd+Shift+P** → **Dev Containers: Reopen in Container**
-3. Everything is pre-built inside the container
+For stealth mode (all data hidden in `.swiftprism/`):
+```json
+{
+  "mcpServers": {
+    "swiftprism": {
+      "command": "swift-prism-mcp",
+      "env": { "SWIFTPRISM_MODE": "stealth" }
+    }
+  }
+}
+```
 
-### Option C: Native Build (No Docker)
+### Manual Build (No Docker)
 
 ```bash
 cd core && swift build -c release
 cp .build/release/swift-prism-analyzer ../extension/bin/
-
-cd ../extension && npm run install:all && npm run build
+cd ../extension && npm install && npx tsc
+cd webview && npm install && npx vite build
 ```
-
-Press **F5** → **Run SwiftPrism Extension**.
 
 ---
 
@@ -284,6 +279,24 @@ Only read files listed in the output.
 | `resource_link` | Cyan | Dash `[6,3]` |
 | `macro_expansion` | Deep Orange | Dash `[5,2]` |
 | `heuristic_link` | Orange | Dotted `[2,4]` |
+
+---
+
+## 🤖 MCP Server Tools
+
+The MCP server exposes the graph to AI agents (Claude Desktop, Claude Code) via the Model Context Protocol.
+
+| Tool | Description |
+|------|-------------|
+| `get_node_info` | Full node data by namespaced ID |
+| `get_contextual_subgraph` | Dynamic subgraph from natural language query — loads only needed fragments |
+| `trace_dependency` | BFS traversal with configurable depth and direction |
+| `find_impact_range` | "What breaks if I change this?" — transitive caller analysis |
+| `get_navigation_path` | Click-to-code locations including extension files |
+| `generate_subgraph_files` | Write fragment JSONs for offline analysis |
+| `load_context_fragments` | Load pre-generated fragments by query ID |
+
+The server discovers graph data automatically by walking upward from CWD to find `.git`, then checking `.swiftprism/` for the hidden config and fragments. If data is missing, tools return guidance instead of crashing — the MCP connection stays green.
 
 ---
 

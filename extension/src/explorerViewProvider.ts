@@ -68,6 +68,10 @@ export class ExplorerViewProvider implements vscode.WebviewViewProvider {
   sendMemberDetail(parentId: string, result: AnalysisResult): void { this.view?.webview.postMessage({ type: "memberDetail", parentId, payload: result }); }
   sendFilePreview(preview: { nodeId: string; previewType: string; data: string; fileName: string }): void { this.view?.webview.postMessage({ type: "filePreview", payload: preview }); }
   sendContextCopied(tokenEstimate: number): void { this.view?.webview.postMessage({ type: "contextCopied", tokenEstimate }); }
+  sendSemanticContextProgress(progress: { total: number; completed: number; cached: number; llmUsed: boolean }): void { this.view?.webview.postMessage({ type: "semanticContextProgress", progress }); }
+  sendSemanticContextComplete(stats: { enrichedCount: number; cachedCount: number; llmUsed: boolean }): void { this.view?.webview.postMessage({ type: "semanticContextComplete", ...stats }); }
+  sendNodeContextUpdate(nodeId: string, context: string): void { this.view?.webview.postMessage({ type: "nodeContextUpdate", nodeId, context }); }
+  sendPendingContextIds(nodeIds: string[]): void { this.view?.webview.postMessage({ type: "pendingContextIds", nodeIds }); }
 
   private getHtmlForWebview(webview: vscode.Webview): string {
     const templatePath = path.join(__dirname, "webview", "index.html");

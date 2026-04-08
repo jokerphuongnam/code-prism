@@ -13,6 +13,7 @@ const PHASE_LABELS: Record<AnalysisPhase, string> = {
   resolving: "Resolving dependencies",
   encoding: "Encoding results",
   streaming: "Streaming data",
+  semantic_context: "Processing Context...",
   complete: "Ready",
   error: "Error",
 };

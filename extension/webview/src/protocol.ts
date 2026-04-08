@@ -171,6 +171,7 @@ export type AnalysisPhase =
   | "resolving"
   | "encoding"
   | "streaming"
+  | "semantic_context"
   | "complete"
   | "error";
 
@@ -197,6 +198,8 @@ export interface FlatMapEntry {
   returns?: string[];
   parameters?: string[];
   origin?: string;
+  /** Token-optimized semantic context from local LLM or fallback */
+  node_context?: string;
 }
 
 export interface FilePreview {
@@ -206,6 +209,13 @@ export interface FilePreview {
   fileName: string;
 }
 
+export interface SemanticContextProgress {
+  total: number;
+  completed: number;
+  cached: number;
+  llmUsed: boolean;
+}
+
 export type HostToWebviewMessage =
   | { type: "analysisResult"; payload: AnalysisResult }
   | { type: "memberDetail"; parentId: string; payload: AnalysisResult }
@@ -213,7 +223,11 @@ export type HostToWebviewMessage =
   | { type: "filePreview"; payload: FilePreview }
   | { type: "progress"; progress: ProgressInfo }
   | { type: "error"; message: string }
-  | { type: "contextCopied"; tokenEstimate: number };
+  | { type: "contextCopied"; tokenEstimate: number }
+  | { type: "semanticContextProgress"; progress: SemanticContextProgress }
+  | { type: "semanticContextComplete"; enrichedCount: number; cachedCount: number; llmUsed: boolean }
+  | { type: "nodeContextUpdate"; nodeId: string; context: string }
+  | { type: "pendingContextIds"; nodeIds: string[] };
 
 export type WebviewToHostMessage =
   | { type: "analyzeRequest" }

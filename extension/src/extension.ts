@@ -14,12 +14,14 @@ import {
   AnalyzerError,
   type FlatMapEntry,
 } from "./analyzerBridge";
+import { enrichWithSemanticContext, persistEnrichedGraph } from "./ollamaBridge";
 import { findSwiftFiles, getWorkspaceRoot } from "./swiftFileDiscovery";
 import { CacheManager } from "./cacheManager";
 
 let activeProcess: ChildProcess | null = null;
 let lastAnalyzerBaseArgs: string[] = [];
 let outputChannel: vscode.OutputChannel;
+let semanticCancellation = { cancelled: false };
 
 function ensureBinaryExists(extensionPath: string): string {
   const binaryPath = resolveAnalyzerBinary(extensionPath);
@@ -78,12 +80,79 @@ export function activate(context: vscode.ExtensionContext) {
     }
   }
 
+  // ── Fire-and-forget semantic context enrichment ──
+  // Takes FlatMapEntry[] directly (already available from directScan or quick analysis).
+  // Runs fully async: the graph is interactive the whole time.
+  // Each node streams its context to the webview as it finishes.
+  function startBackgroundEnrichment(entries: FlatMapEntry[], workspacePath: string) {
+    const currentCancellation = semanticCancellation;
+    const stealthDir = path.join(workspacePath, ".swiftprism");
+
+    // Tell webview which nodes are pending — all enrichable flavors including targets
+    const eligibleFlavors = new Set(["function", "class", "struct", "enum", "actor", "protocol", "macro", "entry_point", "target", "variable", "initializer"]);
+    const pendingIds = entries.filter(e => eligibleFlavors.has(e.flavor)).map(e => e.id);
+    if (pendingIds.length === 0) return;
+
+    viewProvider.sendPendingContextIds(pendingIds);
+    viewProvider.sendProgress({ phase: "semantic_context", processed: 0, total: pendingIds.length });
+
+    enrichWithSemanticContext(
+      entries,
+      stealthDir,
+      {
+        onProgress: (progress) => {
+          if (currentCancellation.cancelled) return;
+          viewProvider.sendSemanticContextProgress(progress);
+          viewProvider.sendProgress({
+            phase: "semantic_context",
+            processed: progress.completed,
+            total: progress.total,
+          });
+        },
+        onNodeEnriched: (nodeId, ctx) => {
+          if (currentCancellation.cancelled) return;
+          viewProvider.sendNodeContextUpdate(nodeId, ctx);
+        },
+      },
+      currentCancellation
+    ).then((enrichResult) => {
+      if (currentCancellation.cancelled) return;
+
+      // Persist enriched graph for MCP server
+      const graphPath = persistEnrichedGraph(entries, workspacePath);
+      if (graphPath) outputChannel.appendLine(`[semantic] Enriched graph saved → ${graphPath}`);
+
+      // Final webview update
+      viewProvider.sendPendingContextIds([]);
+      viewProvider.sendMappingData(entries);
+      viewProvider.sendSemanticContextComplete({
+        enrichedCount: enrichResult.enrichedCount,
+        cachedCount: enrichResult.cachedCount,
+        llmUsed: enrichResult.llmUsed,
+      });
+      viewProvider.sendProgress({ phase: "complete", processed: 1, total: 1 });
+
+      outputChannel.appendLine(
+        `[semantic] Context enrichment: ${enrichResult.enrichedCount} generated, ` +
+        `${enrichResult.cachedCount} cached, LLM: ${enrichResult.llmUsed}`
+      );
+    }).catch((err) => {
+      outputChannel.appendLine(`[semantic] Context enrichment failed (non-fatal): ${err}`);
+      viewProvider.sendPendingContextIds([]);
+      viewProvider.sendProgress({ phase: "complete", processed: 1, total: 1 });
+    });
+  }
+
   const runQuickAnalysis = async () => {
     const workspaceRoot = getWorkspaceRoot();
     if (!workspaceRoot) {
       vscode.window.showErrorMessage("SwiftPrism: Open a workspace folder first.");
       return;
     }
+
+    // Cancel prior enrichment
+    semanticCancellation.cancelled = true;
+    semanticCancellation = { cancelled: false };
 
     viewProvider.sendProgress({ phase: "scanning", processed: 0, total: 0 });
 
@@ -93,9 +162,13 @@ export function activate(context: vscode.ExtensionContext) {
       const entries = await runSwiftAnalyzerToPath(binaryPath, workspaceRoot.fsPath, mappingPath);
 
       viewProvider.sendMappingData(entries);
+      viewProvider.sendProgress({ phase: "complete", processed: 1, total: 1 });
       vscode.window.showInformationMessage(
         `SwiftPrism: Mapped ${entries.length} symbols.`
       );
+
+      // Kick off async enrichment — UI never freezes
+      startBackgroundEnrichment(entries, workspaceRoot.fsPath);
     } catch (err) {
       const message = logError(err, "analysis");
       viewProvider.sendError(message);
@@ -108,6 +181,9 @@ export function activate(context: vscode.ExtensionContext) {
       activeProcess.kill();
       activeProcess = null;
     }
+    // Cancel any in-flight semantic context generation
+    semanticCancellation.cancelled = true;
+    semanticCancellation = { cancelled: false };
 
     const workspaceRoot = getWorkspaceRoot();
     if (!workspaceRoot) {
@@ -171,6 +247,18 @@ export function activate(context: vscode.ExtensionContext) {
       vscode.window.showInformationMessage(
         `SwiftPrism: Full analysis complete — ${fullResult.nodes.length} symbols, ${fullResult.links.length} links${resourceMsg}.`
       );
+
+      // ── Background Semantic Context Enrichment ──
+      // Run a quick directScan to get FlatMapEntry[] (the format ollamaBridge needs),
+      // then enrich each node asynchronously. The 3D graph stays interactive.
+      const mappingPath = cache.resolveMappingPath(workspacePath);
+      runSwiftAnalyzerToPath(binaryPath, workspacePath, mappingPath)
+        .then((entries) => {
+          startBackgroundEnrichment(entries, workspacePath);
+        })
+        .catch((err) => {
+          outputChannel.appendLine(`[semantic] DirectScan for enrichment failed (non-fatal): ${err}`);
+        });
     } catch (err) {
       activeProcess = null;
       const message = logError(err, "analysis");
