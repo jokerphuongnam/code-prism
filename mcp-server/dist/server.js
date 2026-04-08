@@ -4,7 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import * as fs from "fs";
 import * as path from "path";
-import { FragmentLoader, fragmentGraph } from "./fragment-store.js";
+import { FragmentLoader } from "./fragment-store.js";
 import { applyStealthCompression } from "./node-context-generator.js";
 // ═══════════════════════════════════════════════════════════════════════════════
 // PROJECT DISCOVERY — Hidden Data Resolution
@@ -73,7 +73,8 @@ function tryLoadConfig(configPath, baseDir, projectRoot) {
 //   3. <anchor>/prism-context.json                  (legacy — skipped in stealth mode)
 //   4. Walk upward from CWD checking each dir       (fallback if no anchor found)
 function resolveProjectPaths() {
-    const cwd = process.cwd();
+    // PRISM_CWD overrides process.cwd() for location-agnostic deployment
+    const cwd = process.env.PRISM_CWD || process.cwd();
     const anchor = findProjectRoot(cwd);
     if (anchor) {
         // Priority 1: Hidden config
@@ -118,12 +119,44 @@ function notConfiguredResponse() {
     return { content: [{ type: "text", text: NOT_CONFIGURED_MSG }] };
 }
 // ═══════════════════════════════════════════════════════════════════════════════
-// DATA ACCESS — Fragment-first, monolithic fallback
+// IN-MEMORY GRAPH STORE — Load once, O(1) lookup, file-watch reload
 //
-// When fragments exist (.swiftprism/graph-index.json), nodes are loaded
-// on-demand from small per-object files. Nothing persists in memory.
-// When only a monolithic graph exists, it's loaded per-request then freed.
+// The graph is loaded into memory on startup and reloaded when the file changes.
+// No fragments/ directory needed — all fragmentation is done on-demand per request.
 // ═══════════════════════════════════════════════════════════════════════════════
+let _graphNodes = [];
+let _nodeById = new Map();
+let _callerIndex = new Map(); // targetId → [callerIds]
+let _graphLoaded = false;
+function loadGraphIntoMemory() {
+    const paths = resolveProjectPaths();
+    if (!paths)
+        return false;
+    try {
+        const raw = fs.readFileSync(paths.graphPath, "utf-8");
+        const parsed = JSON.parse(raw);
+        const nodes = Array.isArray(parsed) ? parsed : parsed.nodes ?? [];
+        _graphNodes = nodes;
+        _nodeById = new Map(nodes.map((n) => [n.id, n]));
+        // Build reverse caller index for O(1) findCallers
+        _callerIndex = new Map();
+        for (const n of nodes) {
+            for (const callId of [...(n.calls ?? []), ...(n.inits ?? []), ...(n.deinits ?? [])]) {
+                const arr = _callerIndex.get(callId) ?? [];
+                arr.push(n.id);
+                _callerIndex.set(callId, arr);
+            }
+        }
+        _graphLoaded = true;
+        console.error(`[SwiftPrism MCP] Graph loaded: ${nodes.length} nodes, ${_callerIndex.size} reverse links`);
+        return true;
+    }
+    catch (err) {
+        console.error("[SwiftPrism MCP] Failed to load graph:", err);
+        return false;
+    }
+}
+/** Legacy fragment loader — still used by get_lifecycle_map for loadObject */
 function getFragmentLoader() {
     const paths = resolveProjectPaths();
     if (!paths)
@@ -132,54 +165,22 @@ function getFragmentLoader() {
     return loader.available ? loader : null;
 }
 function loadGraph() {
-    const paths = resolveProjectPaths();
-    if (!paths)
-        return null;
-    try {
-        const raw = fs.readFileSync(paths.graphPath, "utf-8");
-        const parsed = JSON.parse(raw);
-        // Handle both formats: raw array or {nodes, targets} object
-        if (Array.isArray(parsed))
-            return { nodes: parsed };
-        return parsed;
-    }
-    catch {
-        return null;
-    }
-}
-/** Auto-fragment the monolithic graph if fragments don't exist yet */
-function ensureFragments() {
-    const paths = resolveProjectPaths();
-    if (!paths)
-        return null;
-    const stealthDir = path.dirname(paths.graphPath);
-    const loader = new FragmentLoader(stealthDir);
-    if (loader.available)
-        return loader;
-    // Auto-fragment from monolithic graph
-    if (fs.existsSync(paths.graphPath)) {
-        try {
-            console.error("[SwiftPrism MCP] Auto-fragmenting graph for on-demand loading...");
-            fragmentGraph(paths.graphPath, stealthDir);
-            console.error("[SwiftPrism MCP] Fragmentation complete.");
-            loader.invalidate();
-            return loader.available ? loader : null;
-        }
-        catch (err) {
-            console.error("[SwiftPrism MCP] Fragmentation failed (non-fatal):", err);
-        }
-    }
+    if (_graphLoaded)
+        return { nodes: _graphNodes };
+    if (loadGraphIntoMemory())
+        return { nodes: _graphNodes };
     return null;
 }
 function findNode(id) {
-    // Try fragment loader first (single file read)
-    const loader = getFragmentLoader();
-    if (loader) {
-        const node = loader.loadNode(id);
-        return node ?? undefined;
-    }
-    // Fallback: monolithic
-    return loadGraph()?.nodes.find((n) => n.id === id);
+    if (!_graphLoaded)
+        loadGraphIntoMemory();
+    return _nodeById.get(id);
+}
+function findCallers(targetId) {
+    if (!_graphLoaded)
+        loadGraphIntoMemory();
+    const callerIds = _callerIndex.get(targetId) ?? [];
+    return callerIds.map((id) => _nodeById.get(id)).filter(Boolean);
 }
 // ═══════════════════════════════════════════════════════════════════════════════
 // TOKEN-OPTIMIZED OUTPUT — Prefer node_context over full node data
@@ -188,12 +189,15 @@ function findNode(id) {
 // If stealth compression is active, further shorten Swift terms.
 // Full source is only sent when explicitly requested (full_source=true).
 // ═══════════════════════════════════════════════════════════════════════════════
+/**
+ * Atomic node response — One Node = One JSON.
+ * Contains only this node's own data. Never inlines other nodes' contexts.
+ * The agent calls get_node_info on each ID in calls/inits/parents to fetch their data.
+ */
 function toTokenOptimized(node, fullSource = false) {
     if (fullSource || !node.node_context) {
-        // No pre-digested context or full source requested — return everything
         return node;
     }
-    // Return compact representation with pre-digested context
     const context = STEALTH_COMPRESSION
         ? applyStealthCompression(node.node_context)
         : node.node_context;
@@ -204,35 +208,41 @@ function toTokenOptimized(node, fullSource = false) {
         node_context: context,
         location: node.location,
         parents: node.parents,
-        // Keep relationship IDs for graph traversal
         ...(node.calls?.length ? { calls: node.calls } : {}),
         ...(node.inits?.length ? { inits: node.inits } : {}),
+        ...(node.deinits?.length ? { deinits: node.deinits } : {}),
         ...(node.stores?.length ? { stores: node.stores } : {}),
     };
+}
+/**
+ * Resolve tagged index references in a node_context string.
+ * Replaces c[0], i[1], di[0], imp[2] etc. with the actual entity name from the node's arrays.
+ * The original symbolic operators (!, ?, ~>, ->) are preserved.
+ */
+function resolveIndexTags(context, node) {
+    return context.replace(/(!|~>|\?|->)?(c|i|di|imp)\[(\d+)\]/g, (_match, prefix, tag, idxStr) => {
+        const idx = parseInt(idxStr, 10);
+        let arr;
+        if (tag === "c")
+            arr = node.calls;
+        else if (tag === "i")
+            arr = node.inits;
+        else if (tag === "di")
+            arr = node.deinits;
+        else if (tag === "imp")
+            arr = node.implements;
+        const resolved = arr?.[idx];
+        if (!resolved)
+            return _match; // index out of bounds — keep original
+        const name = resolved.split("::").pop() ?? resolved;
+        return `${prefix ?? ""}${name}`;
+    });
 }
 function toTokenOptimizedFragment(id, nodeById, fullSource = false) {
     const node = nodeById.get(id);
     if (!node)
         return { id, name: id, flavor: "unknown" };
     return toTokenOptimized(node, fullSource);
-}
-function findCallers(targetId) {
-    const loader = getFragmentLoader();
-    if (loader) {
-        // Scan fragments one at a time — each is freed after processing
-        const callers = [];
-        loader.forEachFragment((nodes) => {
-            for (const n of nodes) {
-                if (n.calls?.includes(targetId) || n.inits?.includes(targetId) || n.deinits?.includes(targetId)) {
-                    callers.push(n);
-                }
-            }
-        });
-        return callers;
-    }
-    return loadGraph()?.nodes.filter((n) => n.calls?.includes(targetId) ||
-        n.inits?.includes(targetId) ||
-        n.deinits?.includes(targetId)) ?? [];
 }
 function traceGraph(nodeId, depth, direction) {
     const visited = new Set();
@@ -264,6 +274,21 @@ function traceGraph(nodeId, depth, direction) {
     walk(nodeId, depth);
     return { nodes: Array.from(visited), edges };
 }
+/** Load file-level and target-level meta summaries from _meta_summaries.json */
+function loadMetaSummaries() {
+    const paths = resolveProjectPaths();
+    if (!paths)
+        return null;
+    const metaPath = path.join(path.dirname(paths.graphPath), "_meta_summaries.json");
+    if (!fs.existsSync(metaPath))
+        return null;
+    try {
+        return JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+    }
+    catch {
+        return null;
+    }
+}
 const server = new McpServer({
     name: "swiftprism",
     version: "1.0.0",
@@ -274,11 +299,17 @@ server.resource("graph", "graph://entire", async (uri) => {
     if (loader) {
         const stats = loader.getStats();
         if (stats) {
+            const meta = loadMetaSummaries();
             return {
                 contents: [{
                         uri: uri.href,
                         mimeType: "application/json",
-                        text: JSON.stringify({ nodeCount: stats.nodeCount, fragmentCount: stats.fragmentCount, sharedCount: stats.sharedCount, generatedAt: stats.generatedAt, mode: "fragmented" }),
+                        text: JSON.stringify({
+                            nodeCount: stats.nodeCount, fragmentCount: stats.fragmentCount,
+                            sharedCount: stats.sharedCount, generatedAt: stats.generatedAt,
+                            mode: "fragmented",
+                            ...(meta ? { fileSummaryCount: Object.keys(meta.files).length, targetSummaryCount: Object.keys(meta.targets).length } : {}),
+                        }),
                     }],
             };
         }
@@ -343,6 +374,13 @@ server.resource("file", "file://{filePath}", async (uri) => {
                 text: JSON.stringify({
                     file: filePath,
                     nodeCount: nodes.length,
+                    ...((() => {
+                        const meta = loadMetaSummaries();
+                        if (!meta)
+                            return {};
+                        const match = Object.entries(meta.files).find(([p]) => p.endsWith(filePath));
+                        return match ? { semantic_context: match[1] } : {};
+                    })()),
                     nodes: nodes.map((n) => ({
                         id: n.id,
                         name: n.name,
@@ -355,21 +393,39 @@ server.resource("file", "file://{filePath}", async (uri) => {
     };
 });
 server.tool("get_node_info", {
-    node_id: z.string().describe("Full namespaced node ID (e.g. Cryptoday::AppDelegate::viewDidLoad())"),
+    node_id: z.string().optional().describe("Single node ID (e.g. App::BlurEffectView::intensity[didSet])"),
+    node_ids: z.array(z.string()).optional().describe("Batch: multiple node IDs to fetch at once"),
     full_source: z.boolean().default(false).describe("If true, return full node data instead of pre-digested context"),
-}, async ({ node_id, full_source }) => {
-    const node = findNode(node_id);
-    if (!node) {
-        return { content: [{ type: "text", text: `Node not found: ${node_id}` }] };
+}, async ({ node_id, node_ids, full_source }) => {
+    // Batch mode: fetch multiple nodes in one call
+    const ids = node_ids ?? (node_id ? [node_id] : []);
+    if (ids.length === 0) {
+        return { content: [{ type: "text", text: "Provide node_id or node_ids." }] };
     }
-    return {
-        content: [
-            {
-                type: "text",
-                text: JSON.stringify(toTokenOptimized(node, full_source), null, 2),
-            },
-        ],
-    };
+    // Single node — original compact response
+    if (ids.length === 1) {
+        const node = findNode(ids[0]);
+        if (!node) {
+            return { content: [{ type: "text", text: `Node not found: ${ids[0]}` }] };
+        }
+        const result = toTokenOptimized(node, full_source);
+        if (result.node_context && /[cdi]\[\d+\]|imp\[\d+\]/.test(result.node_context)) {
+            result.resolved_context = resolveIndexTags(result.node_context, node);
+        }
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+    // Batch — array of atomic node objects
+    const results = ids.map((id) => {
+        const node = findNode(id);
+        if (!node)
+            return { id, error: "not_found" };
+        const result = toTokenOptimized(node, full_source);
+        if (result.node_context && /[cdi]\[\d+\]|imp\[\d+\]/.test(result.node_context)) {
+            result.resolved_context = resolveIndexTags(result.node_context, node);
+        }
+        return result;
+    });
+    return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
 });
 server.tool("trace_dependency", {
     node_id: z.string().describe("Node ID to trace from"),
@@ -396,12 +452,10 @@ server.tool("trace_dependency", {
 server.tool("find_impact_range", { node_id: z.string().describe("Node ID to analyze impact for") }, async ({ node_id }) => {
     const callers = findCallers(node_id);
     const node = findNode(node_id);
+    // Atomic: return only IDs and relationship type. Agent calls get_node_info per ID.
     const directCallers = callers.map((c) => ({
         id: c.id,
-        name: c.name,
-        flavor: c.flavor,
-        file: c.location.absPath,
-        line: c.location.line,
+        relation: "calls",
     }));
     const transitiveTrace = traceGraph(node_id, 5, "incoming");
     return {
@@ -413,15 +467,257 @@ server.tool("find_impact_range", { node_id: z.string().describe("Node ID to anal
                     targetFlavor: node?.flavor ?? "unknown",
                     directCallers,
                     transitiveImpact: transitiveTrace.nodes.length,
-                    affectedNodes: transitiveTrace.nodes,
+                    affectedNodeIds: transitiveTrace.nodes,
                     affectedFiles: [
                         ...new Set(transitiveTrace.nodes
                             .map((id) => findNode(id)?.location.absPath)
                             .filter(Boolean)),
                     ],
+                    _hint: "Call get_node_info on each ID to fetch its node_context for reasoning.",
                 }, null, 2),
             },
         ],
+    };
+});
+// ═══════════════════════════════════════════════════════════════════════════════
+// get_lifecycle_map — Fetch init/deinit lifecycle for a class/actor
+// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// get_lifecycle_map — Parse ini:/di: from node_context into a chronological timeline
+// ═══════════════════════════════════════════════════════════════════════════════
+server.tool("get_lifecycle_map", {
+    node_id: z.string().describe("Object node ID (class/actor) to inspect lifecycle for"),
+}, async ({ node_id }) => {
+    const node = findNode(node_id);
+    if (!node) {
+        return { content: [{ type: "text", text: `Node not found: ${node_id}` }] };
+    }
+    const OBJECT_FLAVORS = new Set(["class", "struct", "enum", "actor", "protocol"]);
+    if (!OBJECT_FLAVORS.has(node.flavor)) {
+        return { content: [{ type: "text", text: `Not an object node (flavor: ${node.flavor}).` }] };
+    }
+    // Parse ini: and di: phases from node_context
+    const ctx = node.node_context ?? "";
+    const iniMatch = ctx.match(/ini:([^|]+)/);
+    const diMatch = ctx.match(/di:([^|]+)/);
+    // Build chronological timeline by resolving index tags
+    const initTimeline = [];
+    if (iniMatch) {
+        const iniRaw = iniMatch[1];
+        // Split by -> (sequence) and , (parallel)
+        const steps = iniRaw.split(/->/).map((s) => s.trim());
+        for (let s = 0; s < steps.length; s++) {
+            for (const part of steps[s].split(",")) {
+                const tagMatch = part.match(/([!?~>]*)i\[(\d+)\]/);
+                if (tagMatch) {
+                    const idx = parseInt(tagMatch[2], 10);
+                    const id = node.inits?.[idx];
+                    const name = id ? (id.split("::").pop() ?? id) : `inits[${idx}]`;
+                    const behavior = tagMatch[1] === "!" ? "mandatory" : tagMatch[1] === "?" ? "conditional" : "sequential";
+                    initTimeline.push({ step: s, tag: part.trim(), resolved: name, behavior });
+                }
+                else {
+                    // Behavior descriptor (e.g., bind_obs, conn)
+                    initTimeline.push({ step: s, tag: part.trim(), resolved: part.trim(), behavior: "side_effect" });
+                }
+            }
+        }
+    }
+    const deinitTimeline = [];
+    if (diMatch) {
+        for (const part of diMatch[1].split(",")) {
+            const tagMatch = part.match(/([!?~>]*)di\[(\d+)\]/);
+            if (tagMatch) {
+                const idx = parseInt(tagMatch[2], 10);
+                const id = node.deinits?.[idx];
+                const name = id ? (id.split("::").pop() ?? id) : `deinits[${idx}]`;
+                deinitTimeline.push({ tag: part.trim(), resolved: name, behavior: tagMatch[1] === "!" ? "mandatory" : "sequential" });
+            }
+            else {
+                deinitTimeline.push({ tag: part.trim(), resolved: part.trim(), behavior: "cleanup" });
+            }
+        }
+    }
+    // Accessors
+    const loader = getFragmentLoader();
+    const accessorIds = [];
+    if (loader) {
+        for (const child of loader.loadObject(node_id)) {
+            if (child.flavor === "variable" && child.id !== node_id)
+                accessorIds.push(child.id);
+        }
+    }
+    return {
+        content: [{
+                type: "text",
+                text: JSON.stringify({
+                    node_id,
+                    node_context: ctx || null,
+                    resolved_context: ctx ? resolveIndexTags(ctx, node) : null,
+                    lifecycle: {
+                        init: { raw: iniMatch?.[1] ?? null, timeline: initTimeline },
+                        deinit: { raw: diMatch?.[1] ?? null, timeline: deinitTimeline },
+                    },
+                    arrays: {
+                        inits: node.inits ?? [],
+                        deinits: node.deinits ?? [],
+                        implements: node.implements ?? [],
+                    },
+                    accessorIds,
+                }, null, 2),
+            }],
+    };
+});
+// ═══════════════════════════════════════════════════════════════════════════════
+// resolve_node_logic — Resolve index tags into human/AI-readable logic flow
+// ═══════════════════════════════════════════════════════════════════════════════
+server.tool("resolve_node_logic", {
+    node_id: z.string().describe("Node ID to resolve logic for"),
+}, async ({ node_id }) => {
+    const node = findNode(node_id);
+    if (!node) {
+        return { content: [{ type: "text", text: `Node not found: ${node_id}` }] };
+    }
+    if (!node.node_context) {
+        return { content: [{ type: "text", text: JSON.stringify({ node_id, resolved: null, reason: "No node_context generated" }) }] };
+    }
+    const resolved = resolveIndexTags(node.node_context, node);
+    return {
+        content: [{
+                type: "text",
+                text: JSON.stringify({
+                    node_id,
+                    raw_context: node.node_context,
+                    resolved_context: resolved,
+                }, null, 2),
+            }],
+    };
+});
+// ═══════════════════════════════════════════════════════════════════════════════
+// trace_impact_chain — Scan callers' node_context for index refs to the target
+// ═══════════════════════════════════════════════════════════════════════════════
+server.tool("trace_impact_chain", {
+    node_id: z.string().describe("Node ID to trace impact for — who references it and HOW"),
+}, async ({ node_id }) => {
+    const node = findNode(node_id);
+    if (!node) {
+        return { content: [{ type: "text", text: `Node not found: ${node_id}` }] };
+    }
+    const callers = findCallers(node_id);
+    const targetName = node_id.split("::").pop() ?? node_id;
+    // Scan each caller's node_context for index references that resolve to our target
+    const impacts = [];
+    for (const caller of callers) {
+        if (!caller.node_context) {
+            impacts.push({ caller_id: caller.id, behavior: "unknown", raw_ref: "—", context_snippet: "no context" });
+            continue;
+        }
+        // Find which array and index points to our target
+        let foundRef = null;
+        let behavior = "calls";
+        // Check calls[] array
+        const callIdx = caller.calls?.indexOf(node_id) ?? -1;
+        if (callIdx >= 0) {
+            // Look for c[callIdx] in the caller's context
+            const refPattern = new RegExp(`([!?]|~>)?c\\[${callIdx}\\]`);
+            const match = caller.node_context.match(refPattern);
+            if (match) {
+                foundRef = match[0];
+                const prefix = match[1] ?? "";
+                behavior = prefix === "!" ? "mandatory" : prefix === "?" ? "conditional" : prefix === "~>" ? "async_side_effect" : "sequential";
+            }
+            else {
+                foundRef = `c[${callIdx}]`;
+                behavior = "calls";
+            }
+        }
+        // Check inits[] array
+        if (!foundRef) {
+            const initIdx = caller.inits?.indexOf(node_id) ?? -1;
+            if (initIdx >= 0) {
+                const refPattern = new RegExp(`([!?])?i\\[${initIdx}\\]`);
+                const match = caller.node_context.match(refPattern);
+                foundRef = match ? match[0] : `i[${initIdx}]`;
+                behavior = match?.[1] === "!" ? "mandatory_init" : "init";
+            }
+        }
+        // Check deinits[] array
+        if (!foundRef) {
+            const diIdx = caller.deinits?.indexOf(node_id) ?? -1;
+            if (diIdx >= 0) {
+                foundRef = `di[${diIdx}]`;
+                behavior = "cleanup";
+            }
+        }
+        impacts.push({
+            caller_id: caller.id,
+            behavior,
+            raw_ref: foundRef ?? "—",
+            context_snippet: caller.node_context.slice(0, 80),
+        });
+    }
+    return {
+        content: [{
+                type: "text",
+                text: JSON.stringify({
+                    target: node_id,
+                    targetName,
+                    impactCount: impacts.length,
+                    impacts,
+                }, null, 2),
+            }],
+    };
+});
+// ═══════════════════════════════════════════════════════════════════════════════
+// resolve_logic_chain — Follow parents→calls to explain a full business flow
+// ═══════════════════════════════════════════════════════════════════════════════
+server.tool("resolve_logic_chain", {
+    start_node_id: z.string().describe("Starting node ID (e.g. a didSet variable or a function)"),
+    depth: z.number().default(4).describe("Max chain depth to follow (default 4)"),
+}, async ({ start_node_id, depth }) => {
+    const startNode = findNode(start_node_id);
+    if (!startNode) {
+        return { content: [{ type: "text", text: `Node not found: ${start_node_id}` }] };
+    }
+    const chain = [];
+    const visited = new Set();
+    chain.push({ step: 0, direction: "start", id: startNode.id,
+        ...(startNode.node_context ? { resolved_context: resolveIndexTags(startNode.node_context, startNode) } : {}),
+    });
+    visited.add(startNode.id);
+    for (const pid of startNode.parents) {
+        if (visited.has(pid))
+            continue;
+        visited.add(pid);
+        const parent = findNode(pid);
+        if (parent) {
+            chain.push({ step: 0, direction: "parent", id: parent.id,
+                ...(parent.node_context ? { resolved_context: resolveIndexTags(parent.node_context, parent) } : {}),
+            });
+        }
+    }
+    let frontier = [...(startNode.calls ?? []), ...(startNode.inits ?? [])];
+    for (let d = 1; d <= depth && frontier.length > 0; d++) {
+        const nextFrontier = [];
+        for (const callId of frontier) {
+            if (visited.has(callId))
+                continue;
+            visited.add(callId);
+            const called = findNode(callId);
+            if (!called)
+                continue;
+            chain.push({ step: d, direction: "calls", id: called.id,
+                ...(called.node_context ? { resolved_context: resolveIndexTags(called.node_context, called) } : {}),
+            });
+            nextFrontier.push(...(called.calls ?? []).slice(0, 3));
+        }
+        frontier = nextFrontier;
+    }
+    return {
+        content: [{
+                type: "text",
+                text: JSON.stringify({ startNode: start_node_id, chainLength: chain.length, chain }, null, 2),
+            }],
     };
 });
 server.tool("get_navigation_path", { node_id: z.string().describe("Node ID to navigate to") }, async ({ node_id }) => {
@@ -455,16 +751,19 @@ server.tool("get_contextual_subgraph", {
     depth: z.number().default(2).describe("Relationship expansion depth"),
     full_source: z.boolean().default(false).describe("If true, return full node data instead of pre-digested node_context"),
 }, async ({ query, max_seeds, depth, full_source }) => {
-    // ── Phase 0: Ensure fragments or load monolithic ──
-    const loader = ensureFragments();
+    // Load graph into memory if not already loaded
+    if (!_graphLoaded)
+        loadGraphIntoMemory();
+    if (_graphNodes.length === 0)
+        return notConfiguredResponse();
     const queryTokens = query
         .toLowerCase()
         .replace(/[^a-z0-9\s]/g, " ")
         .split(/\s+/)
         .filter((t) => t.length > 2);
-    // ── Phase 1: Seed discovery (scan fragments one-at-a-time) ──
+    // ── Phase 1: Seed discovery from in-memory graph ──
     const scored = [];
-    function scoreNode(node) {
+    for (const node of _graphNodes) {
         let score = 0;
         const haystack = `${node.id} ${node.name} ${node.flavor}`.toLowerCase();
         for (const token of queryTokens) {
@@ -479,28 +778,8 @@ server.tool("get_contextual_subgraph", {
             score += 3;
         if (node.flavor === "function" && (node.calls?.length ?? 0) > 0)
             score += 2;
-        return score;
-    }
-    if (loader) {
-        // Fragment mode: scan each file individually, score, discard
-        loader.forEachFragment((nodes) => {
-            for (const node of nodes) {
-                const s = scoreNode(node);
-                if (s > 0)
-                    scored.push({ node, score: s });
-            }
-        });
-    }
-    else {
-        // Monolithic fallback
-        const data = loadGraph();
-        if (!data || data.nodes.length === 0)
-            return notConfiguredResponse();
-        for (const node of data.nodes) {
-            const s = scoreNode(node);
-            if (s > 0)
-                scored.push({ node, score: s });
-        }
+        if (score > 0)
+            scored.push({ node, score });
     }
     const seeds = scored
         .sort((a, b) => b.score - a.score)
@@ -516,46 +795,33 @@ server.tool("get_contextual_subgraph", {
     }
     // ── Phase 2: Stitch subgraph from seeds ──
     const seedIds = seeds.map((s) => s.id);
-    let stitchedNodes;
     let missingRefs = [];
-    if (loader) {
-        // Fragment mode: stitch loads only needed files + shared globals
-        const stitched = loader.stitch(seedIds, depth);
-        stitchedNodes = stitched.nodes;
-        missingRefs = stitched.missing;
-    }
-    else {
-        // Monolithic fallback: BFS expansion in memory
-        const data = loadGraph();
-        if (!data)
-            return notConfiguredResponse();
-        const nodeById = new Map(data.nodes.map((n) => [n.id, n]));
-        const collected = new Set();
-        let frontier = new Set(seedIds);
-        for (let d = 0; d <= depth; d++) {
-            const next = new Set();
-            for (const id of frontier) {
-                if (collected.has(id))
-                    continue;
-                collected.add(id);
-                const node = nodeById.get(id);
-                if (!node) {
-                    missingRefs.push(id);
-                    continue;
-                }
-                for (const ref of [...(node.calls ?? []), ...(node.inits ?? []), ...(node.stores ?? [])]) {
-                    if (!collected.has(ref))
-                        next.add(ref);
-                }
-                for (const p of node.parents) {
-                    if (p.includes("::") && !collected.has(p))
-                        next.add(p);
-                }
+    // In-memory BFS expansion from seeds
+    const collected = new Set();
+    let frontier = new Set(seedIds);
+    for (let d = 0; d <= depth; d++) {
+        const next = new Set();
+        for (const id of frontier) {
+            if (collected.has(id))
+                continue;
+            collected.add(id);
+            const node = _nodeById.get(id);
+            if (!node) {
+                missingRefs.push(id);
+                continue;
             }
-            frontier = next;
+            for (const ref of [...(node.calls ?? []), ...(node.inits ?? []), ...(node.stores ?? [])]) {
+                if (!collected.has(ref))
+                    next.add(ref);
+            }
+            for (const p of node.parents) {
+                if (p.includes("::") && !collected.has(p))
+                    next.add(p);
+            }
         }
-        stitchedNodes = data.nodes.filter((n) => collected.has(n.id));
+        frontier = next;
     }
+    const stitchedNodes = _graphNodes.filter((n) => collected.has(n.id));
     // ── Phase 3: Classify into primary / relationship / shared ──
     const nodeById = new Map(stitchedNodes.map((n) => [n.id, n]));
     // Primary = seeds + their direct parents/calls
@@ -601,7 +867,7 @@ server.tool("get_contextual_subgraph", {
                 type: "text",
                 text: JSON.stringify({
                     query,
-                    mode: loader ? "fragmented" : "monolithic",
+                    mode: "in_memory",
                     seedCount: seeds.length,
                     seeds: seeds.map((s) => ({ id: s.id, name: s.name, flavor: s.flavor })),
                     fragments: result,
@@ -698,6 +964,229 @@ server.tool("load_context_fragments", {
             }],
     };
 });
+// ═══════════════════════════════════════════════════════════════════════════════
+// search_symbols — Find node IDs by name/flavor query
+// ═══════════════════════════════════════════════════════════════════════════════
+server.tool("search_symbols", {
+    query: z.string().describe("Search term (e.g. 'intensity', 'BlurEffect', 'didSet')"),
+    flavor: z.string().optional().describe("Filter by flavor (class, function, variable, etc.)"),
+    limit: z.number().default(10).describe("Max results"),
+}, async ({ query, flavor, limit }) => {
+    const loader = getFragmentLoader();
+    const queryLower = query.toLowerCase();
+    const results = [];
+    if (loader) {
+        loader.forEachFragment((nodes) => {
+            for (const n of nodes) {
+                if (results.length >= limit)
+                    return;
+                if (flavor && n.flavor !== flavor)
+                    continue;
+                const haystack = `${n.id} ${n.name}`.toLowerCase();
+                if (haystack.includes(queryLower)) {
+                    results.push({ id: n.id, name: n.name, flavor: n.flavor, context: n.node_context ?? null });
+                }
+            }
+        });
+    }
+    else {
+        const data = loadGraph();
+        if (data) {
+            for (const n of data.nodes) {
+                if (results.length >= limit)
+                    break;
+                if (flavor && n.flavor !== flavor)
+                    continue;
+                const haystack = `${n.id} ${n.name}`.toLowerCase();
+                if (haystack.includes(queryLower)) {
+                    results.push({ id: n.id, name: n.name, flavor: n.flavor, context: n.node_context ?? null });
+                }
+            }
+        }
+    }
+    return {
+        content: [{
+                type: "text",
+                text: JSON.stringify({ query, resultCount: results.length, results }, null, 2),
+            }],
+    };
+});
+// ═══════════════════════════════════════════════════════════════════════════════
+// get_logical_cluster — Node + immediate neighborhood with resolved contexts
+// ═══════════════════════════════════════════════════════════════════════════════
+server.tool("get_logical_cluster", {
+    node_id: z.string().describe("Center node ID"),
+}, async ({ node_id }) => {
+    const node = findNode(node_id);
+    if (!node) {
+        return { content: [{ type: "text", text: `Node not found: ${node_id}` }] };
+    }
+    // The center node with resolved context
+    const center = {
+        ...toTokenOptimized(node),
+        ...(node.node_context ? { resolved_context: resolveIndexTags(node.node_context, node) } : {}),
+    };
+    // Immediate neighbors: parents, calls, inits, deinits — each with their own context
+    const neighbors = [];
+    for (const pid of node.parents) {
+        const p = findNode(pid);
+        if (p)
+            neighbors.push({ id: p.id, relation: "parent", name: p.name, flavor: p.flavor, context: p.node_context ?? null });
+    }
+    for (const cid of node.calls ?? []) {
+        const c = findNode(cid);
+        if (c)
+            neighbors.push({ id: c.id, relation: "calls", name: c.name, flavor: c.flavor, context: c.node_context ?? null });
+    }
+    for (const iid of node.inits ?? []) {
+        const i = findNode(iid);
+        if (i)
+            neighbors.push({ id: i.id, relation: "init", name: i.name, flavor: i.flavor, context: i.node_context ?? null });
+    }
+    for (const did of node.deinits ?? []) {
+        const d = findNode(did);
+        if (d)
+            neighbors.push({ id: d.id, relation: "deinit", name: d.name, flavor: d.flavor, context: d.node_context ?? null });
+    }
+    // Also find who calls this node (reverse)
+    const callers = findCallers(node_id).slice(0, 5);
+    for (const caller of callers) {
+        neighbors.push({ id: caller.id, relation: "called_by", name: caller.name, flavor: caller.flavor, context: caller.node_context ?? null });
+    }
+    return {
+        content: [{
+                type: "text",
+                text: JSON.stringify({ center, neighborCount: neighbors.length, neighbors }, null, 2),
+            }],
+    };
+});
+// ═══════════════════════════════════════════════════════════════════════════════
+// get_project_summary — High-level overview for token-efficient entry point
+// ═══════════════════════════════════════════════════════════════════════════════
+server.tool("get_project_summary", {}, async () => {
+    const loader = getFragmentLoader();
+    // Count by flavor
+    const flavorCounts = {};
+    const targets = [];
+    let totalNodes = 0;
+    if (loader) {
+        loader.forEachFragment((nodes) => {
+            for (const n of nodes) {
+                totalNodes++;
+                flavorCounts[n.flavor] = (flavorCounts[n.flavor] ?? 0) + 1;
+                if (n.flavor === "target") {
+                    targets.push({ id: n.id, name: n.name, origin: n.origin ?? null, context: n.node_context ?? null });
+                }
+            }
+        });
+    }
+    else {
+        const data = loadGraph();
+        if (!data) {
+            return { content: [{ type: "text", text: NOT_CONFIGURED_MSG }] };
+        }
+        for (const n of data.nodes) {
+            totalNodes++;
+            flavorCounts[n.flavor] = (flavorCounts[n.flavor] ?? 0) + 1;
+            if (n.flavor === "target") {
+                targets.push({ id: n.id, name: n.name, origin: n.origin ?? null, context: n.node_context ?? null });
+            }
+        }
+    }
+    // Load file summaries if available
+    const meta = loadMetaSummaries();
+    return {
+        content: [{
+                type: "text",
+                text: JSON.stringify({
+                    totalNodes,
+                    flavorCounts,
+                    targets,
+                    fileSummaryCount: meta ? Object.keys(meta.files).length : 0,
+                    _workflow: "Start here. Use search_symbols to find specific nodes. Use get_logical_cluster for a node and its neighborhood. Use get_node_info for individual node details.",
+                }, null, 2),
+            }],
+    };
+});
+// ═══════════════════════════════════════════════════════════════════════════════
+// get_smart_context — On-demand fragmentation: fetch target nodes + neighbors
+//                     with shared-node deduplication and resolved indices
+// ═══════════════════════════════════════════════════════════════════════════════
+server.tool("get_smart_context", {
+    target_ids: z.array(z.string()).describe("List of node IDs to build context for"),
+    depth: z.number().default(1).describe("Neighbor expansion depth (default 1)"),
+}, async ({ target_ids, depth }) => {
+    if (!_graphLoaded)
+        loadGraphIntoMemory();
+    if (_graphNodes.length === 0)
+        return notConfiguredResponse();
+    // Phase 1: Collect target nodes + recursive neighbors
+    const collected = new Map();
+    const refCounts = new Map(); // track how many targets reference each node
+    for (const targetId of target_ids) {
+        const frontier = [targetId];
+        const visited = new Set();
+        for (let d = 0; d <= depth; d++) {
+            const nextFrontier = [];
+            for (const id of frontier) {
+                if (visited.has(id))
+                    continue;
+                visited.add(id);
+                const node = _nodeById.get(id);
+                if (!node)
+                    continue;
+                collected.set(id, node);
+                refCounts.set(id, (refCounts.get(id) ?? 0) + 1);
+                if (d < depth) {
+                    // Expand: calls, inits, deinits, parents
+                    for (const ref of [...(node.calls ?? []), ...(node.inits ?? []), ...(node.deinits ?? [])]) {
+                        if (!visited.has(ref))
+                            nextFrontier.push(ref);
+                    }
+                    for (const p of node.parents) {
+                        if (p.includes("::") && !visited.has(p))
+                            nextFrontier.push(p);
+                    }
+                }
+            }
+            frontier.length = 0;
+            frontier.push(...nextFrontier);
+        }
+    }
+    // Phase 2: Classify into primary (requested), neighbors, and shared (referenced by 2+ targets)
+    const targetSet = new Set(target_ids);
+    const primary = [];
+    const neighbors = [];
+    const shared = [];
+    for (const [id, node] of collected) {
+        const optimized = toTokenOptimized(node);
+        // Auto-resolve index tags
+        if (optimized.node_context && /[cdi]\[\d+\]|imp\[\d+\]/.test(optimized.node_context)) {
+            optimized.resolved_context = resolveIndexTags(optimized.node_context, node);
+        }
+        if (targetSet.has(id)) {
+            primary.push(optimized);
+        }
+        else if ((refCounts.get(id) ?? 0) >= 2) {
+            shared.push(optimized);
+        }
+        else {
+            neighbors.push(optimized);
+        }
+    }
+    return {
+        content: [{
+                type: "text",
+                text: JSON.stringify({
+                    requested: target_ids.length,
+                    primary: { count: primary.length, nodes: primary },
+                    neighbors: { count: neighbors.length, nodes: neighbors },
+                    shared_dependencies: { count: shared.length, nodes: shared },
+                    total: collected.size,
+                }, null, 2),
+            }],
+    };
+});
 async function main() {
     // CRITICAL: Never call process.exit(). The server must stay alive
     // to keep the MCP connection green, even if data is missing.
@@ -708,17 +1197,14 @@ async function main() {
         console.error(`[SwiftPrism MCP] Connected (mode: ${mode})`);
         const paths = resolveProjectPaths();
         if (paths) {
-            // Auto-fragment at startup if monolithic graph exists but fragments don't
-            const loader = ensureFragments();
-            if (loader) {
-                const stats = loader.getStats();
-                console.error(`[SwiftPrism MCP] Fragments ready: ${stats?.nodeCount ?? "?"} nodes in ${stats?.fragmentCount ?? "?"} files`);
-            }
+            // Load graph into memory at startup
+            loadGraphIntoMemory();
+            // Watch for changes and reload
             try {
                 fs.watch(path.dirname(paths.graphPath), (_event, filename) => {
                     if (filename === path.basename(paths.graphPath)) {
-                        console.error("[SwiftPrism MCP] Graph file changed — re-fragmenting...");
-                        ensureFragments()?.invalidate();
+                        console.error("[SwiftPrism MCP] Graph file changed — reloading into memory...");
+                        loadGraphIntoMemory();
                     }
                 });
                 console.error(`[SwiftPrism MCP] Watching: ${paths.graphPath}`);

@@ -55,8 +55,33 @@
       {
         "command": "swiftPrism.clearCache",
         "title": "SwiftPrism: Clear Cache"
+      },
+      {
+        "command": "swiftPrism.configureMCP",
+        "title": "SwiftPrism: Configure MCP Server",
+        "icon": "$(plug)"
       }
     ],
+    "configuration": {
+      "title": "SwiftPrism",
+      "properties": {
+        "swiftPrism.mcp.autoEnable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically write .mcp.json to the workspace root on activation so Claude Code can discover the SwiftPrism MCP server."
+        },
+        "swiftPrism.mcp.stealthMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Only look for .swiftprism/ hidden directory (no visible config files)."
+        },
+        "swiftPrism.mcp.compression": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable stealth compression — shortens common Swift terms in node_context for token savings."
+        }
+      }
+    },
     "menus": {
       "view/title": [
         {
