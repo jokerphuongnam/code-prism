@@ -1,20 +1,27 @@
 /**
- * node-context-generator.ts — Local LLM Pre-Processing Pipeline
+ * node-context-generator.ts — Entity-Aware LLM Pre-Processing Pipeline
  *
- * Generates token-optimized `node_context` strings for each important node
- * by sending source code to a local LLM (Ollama). Uses incremental caching
- * based on file content hashes to avoid redundant regeneration.
+ * Two-pass enrichment with flavor-specific semantic templates:
+ *   Pass 1: Leaf nodes (functions, macros, entry_points, targets)
+ *   Pass 2: Parent nodes (classes, structs, enums, actors, protocols)
+ *           — context incorporates children's resolved summaries
+ *
+ * Token templates per flavor:
+ *   Function:  f:name|i:intent|p:params|d:deps|s:side_effects
+ *   Class:     c:name|resp:responsibility|state:fields|d:deps
+ *   Struct:    s:name|p:fields|i:data_purpose
+ *   Protocol:  i:name|contract:behaviors|req:methods
+ *   Enum:      e:name|cases:a,b,c|i:purpose
+ *   Target:    lib:name|role:project_role|usage:features
  *
  * Usage:
- *   npx ts-node node-context-generator.ts <graph-path> [--ollama-model codellama]
- *   node dist/node-context-generator.js <graph-path>
+ *   node dist/node-context-generator.js <graph-path> [--ollama-model codellama]
  */
 interface GeneratorConfig {
     ollamaEndpoint: string;
     ollamaModel: string;
     maxConcurrent: number;
     timeoutMs: number;
-    /** Flavors eligible for context generation */
     eligibleFlavors: Set<string>;
 }
 export interface GenerateResult {
@@ -24,15 +31,6 @@ export interface GenerateResult {
     failed: number;
     usedLLM: boolean;
 }
-/**
- * Generate node_context for all eligible nodes in the graph.
- * Writes enriched nodes back to the graph file with `node_context` field.
- * Uses incremental caching — only regenerates when source file hash changes.
- */
 export declare function generateNodeContexts(graphPath: string, outputDir: string, configOverrides?: Partial<GeneratorConfig>): Promise<GenerateResult>;
-/**
- * Apply stealth compression to a node_context string.
- * Replaces common Swift terms with compact symbols.
- */
 export declare function applyStealthCompression(context: string): string;
 export {};
