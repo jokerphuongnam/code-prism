@@ -1,9 +1,7 @@
 # rust-prism
 
-Code Prism **language backend** for **rust**.
+Writes SoT to `~/Library/Caches/code-prism/rust/<projectKey>/` (not into the user project).
 
 ```bash
-./bin/rust-prism --root /path/to/project --out /path/to/project/.codeprism/prism-context.json
+./bin/rust-prism --root /path/to/user/project
 ```
-
-Lives under `code-prism/backends/` with other `*-prism` repos. SoT is read by mcp-prism / Mac UI / VS Code.
