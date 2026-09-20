@@ -1,1 +1,0 @@
-{"root":["./src/app.tsx","./src/d3-force-3d.d.ts","./src/main.tsx","./src/protocol.ts","./src/components/graphview.tsx","./src/components/guideview.tsx","./src/components/header.tsx","./src/components/jsonpreview.tsx","./src/components/nodedetailcard.tsx","./src/components/statusbar.tsx","./src/design/theme.ts","./src/hooks/usevscodemessaging.ts"],"version":"5.9.3"}
