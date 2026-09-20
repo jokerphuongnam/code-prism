@@ -126,7 +126,7 @@ build_mcp_server() {
         printf "*\n" > "$HIDDEN_DIR/.gitignore"
     fi
 
-    cat > "$HIDDEN_DIR/swiftprism-config.json" <<CFGEOF
+    cat > "$HIDDEN_DIR/codeprism-config.json" <<CFGEOF
 {
   "graphPath": "$HIDDEN_DIR/prism-context.json",
   "sqlitePath": "$HIDDEN_DIR/graph.sqlite",
@@ -137,7 +137,7 @@ build_mcp_server() {
 CFGEOF
 
     # Remove legacy root-level config
-    rm -f "$PROJECT_ROOT/swiftprism-config.json"
+    rm -f "$PROJECT_ROOT/codeprism-config.json"
 
     chmod +x dist/server.js
     cd ..
@@ -239,7 +239,7 @@ verify_binary() {
 generate_context() {
     print_step "Detecting project type and generating context data"
     local WORKSPACE_ROOT="${1:-$SCRIPT_DIR}"
-    local HIDDEN_DIR="$WORKSPACE_ROOT/.swiftprism"
+    local HIDDEN_DIR="$WORKSPACE_ROOT/.codeprism"
     local CONTEXT_OUT="$HIDDEN_DIR/prism-context.json"
 
     # Create hidden directory with gitignore
