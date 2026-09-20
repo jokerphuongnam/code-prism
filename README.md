@@ -1,5 +1,8 @@
 # swift-prism
 
+
+> Local checkout: `~/Documents/Code/code-prism/backends/swift-prism`
+
 **Swift language backend** for Code Prism.
 
 `main` analyzes Swift → writes **SoT** under the target project:
@@ -19,6 +22,8 @@ This repo is **not** a UI. Viewers and MCP are separate:
 | [marlin-prism](https://github.com/jokerphuongnam/marlin-prism) | Marlin backend |
 | [kotlin-prism](https://github.com/jokerphuongnam/kotlin-prism) | Kotlin backend |
 | [js-prism](https://github.com/jokerphuongnam/js-prism) | JS/TS backend |
+| [rust-prism](https://github.com/jokerphuongnam/rust-prism) | Rust backend |
+| [go-prism](https://github.com/jokerphuongnam/go-prism) | Go backend |
 | [mcp-prism](https://github.com/jokerphuongnam/mcp-prism) | MCP reads SoT (all languages) |
 | [code-prism-app-mac](https://github.com/jokerphuongnam/code-prism-app-mac) | macOS SceneKit UI |
 | [code-prism-vs-code](https://github.com/jokerphuongnam/code-prism-vs-code) | VS Code extension |
