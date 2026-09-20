@@ -11,3 +11,7 @@ Code Prism **language backend** for **js**.
 SoT is read by [mcp-prism](https://github.com/jokerphuongnam/mcp-prism), [code-prism-app-mac](https://github.com/jokerphuongnam/code-prism-app-mac), and [code-prism-vs-code](https://github.com/jokerphuongnam/code-prism-vs-code).
 
 This is a lightweight signature/import map (v0), not a full semantic indexer.
+
+Local path: `~/Documents/Code/code-prism/backends/js-prism`
+
+- Also: rust-prism, go-prism, swift-prism, mcp-prism
