@@ -6,6 +6,26 @@ SwiftPrism transforms your Swift codebase into an interactive 3D force-directed 
 
 ---
 
+## SwiftUI app (native viewer)
+
+macOS app that works like **agents-holding**: pick a project → install/run a **backend plugin** → UI reads **SoT only** (`.swiftprism/prism-context.json` + `graph.sqlite`).
+
+```bash
+# 1) Build analyzer backend once
+cd core && swift build -c release
+cp .build/release/swift-prism-analyzer ../extension/bin/
+
+# 2) Open the SwiftUI app
+cd ../app
+xcodegen generate   # if needed
+open SwiftPrismApp.xcodeproj
+# Run (⌘R). Try "LiteTrace demo" → Install backend → Analyze → SoT
+```
+
+- **UI** (`app/`): SceneKit 3D graph, search, inspector — never parses Swift itself  
+- **Backend** (`backends/` + `core` binary): one `main` that writes SoT under `<project>/.swiftprism/`  
+- Sample project: `~/Documents/Code/iOS/LiteTrace`
+
 ## 🎯 Core Value Propositions
 
 ### 3D Semantic Mapping
