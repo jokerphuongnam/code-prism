@@ -33,13 +33,20 @@ SwiftPrism follows a **three-layer** architecture: Swift AST analysis, VS Code 3
 swift-prism/
   core/             Swift CLI — SwiftSyntax two-pass analysis
   extension/        VS Code — React + Three.js 3D webview
-  mcp-server/       MCP Server — fragmented graph access for Claude
+  mcp-server/       MCP Server — graph access for AI (SQLite SoT + JSON fallback)
   .swiftprism/      Hidden data (auto-generated, gitignored)
-    fragments/        Per-object JSON files for on-demand loading
-    graph-index.json  Lightweight { nodeId → fragmentFile } map
-    _targets.json     Target hub nodes (UIKit, Foundation, etc.)
-    _shared.json      Bridge nodes referenced by 2+ logic flows
+    prism-context.json  Analyzer / webview interchange (JSON)
+    graph.sqlite        SQLite SoT for MCP queries (nodes + edges)
+    fragments/          Per-object JSON files for on-demand loading
+    graph-index.json    Lightweight { nodeId → fragmentFile } map
+    _targets.json       Target hub nodes (UIKit, Foundation, etc.)
+    _shared.json        Bridge nodes referenced by 2+ logic flows
 ```
+
+### Storage hybrid (JSON + SQLite)
+
+- **JSON** (`prism-context.json`): written by the Swift analyzer; still used by the VS Code webview and as the interchange format.
+- **SQLite** (`graph.sqlite`): imported after analysis (`./run.sh` or `npm run import-db -- <json> [out.sqlite]`). MCP prefers SQLite for `search_symbols`, `get_project_summary`, and in-memory load (with JSON fallback + auto-import).
 
 ### Execution-First Model
 

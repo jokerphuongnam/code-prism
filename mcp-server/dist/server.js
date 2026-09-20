@@ -6,6 +6,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { FragmentLoader } from "./fragment-store.js";
 import { applyStealthCompression } from "./node-context-generator.js";
+import { GraphDatabase, importGraphFromJson, sqlitePathBesideGraph, } from "./graph-db.js";
 // ═══════════════════════════════════════════════════════════════════════════════
 // PROJECT DISCOVERY — Hidden Data Resolution
 //
@@ -54,12 +55,16 @@ function tryLoadConfig(configPath, baseDir, projectRoot) {
             : null;
         if (!resolvedGraph || !fs.existsSync(resolvedGraph))
             return null;
+        const sqliteCandidate = cfg.sqlitePath
+            ? (path.isAbsolute(cfg.sqlitePath) ? cfg.sqlitePath : path.resolve(baseDir, cfg.sqlitePath))
+            : sqlitePathBesideGraph(resolvedGraph);
         return {
             graphPath: resolvedGraph,
             contextsDir: cfg.contextsDir
                 ? (path.isAbsolute(cfg.contextsDir) ? cfg.contextsDir : path.resolve(baseDir, cfg.contextsDir))
                 : path.join(path.dirname(resolvedGraph), "contexts"),
             projectRoot,
+            sqlitePath: fs.existsSync(sqliteCandidate) ? sqliteCandidate : undefined,
         };
     }
     catch {
@@ -90,7 +95,13 @@ function resolveProjectPaths() {
             // Priority 3: Legacy prism-context.json
             const legacyPath = path.join(anchor, "prism-context.json");
             if (fs.existsSync(legacyPath)) {
-                return { graphPath: legacyPath, contextsDir: path.join(anchor, "out", "contexts"), projectRoot: anchor };
+                const sqliteCandidate = sqlitePathBesideGraph(legacyPath);
+                return {
+                    graphPath: legacyPath,
+                    contextsDir: path.join(anchor, "out", "contexts"),
+                    projectRoot: anchor,
+                    sqlitePath: fs.existsSync(sqliteCandidate) ? sqliteCandidate : undefined,
+                };
             }
         }
     }
@@ -128,17 +139,45 @@ let _graphNodes = [];
 let _nodeById = new Map();
 let _callerIndex = new Map(); // targetId → [callerIds]
 let _graphLoaded = false;
+let _graphDb = null;
+function ensureSqliteBesideJson(paths) {
+    const dbPath = paths.sqlitePath ?? sqlitePathBesideGraph(paths.graphPath);
+    if (fs.existsSync(dbPath))
+        return dbPath;
+    // Auto-import once so MCP works after older ./run.sh that only wrote JSON.
+    try {
+        const result = importGraphFromJson(paths.graphPath, dbPath);
+        console.error(`[SwiftPrism MCP] Imported JSON → SQLite: ${result.nodeCount} nodes, ${result.edgeCount} edges → ${result.dbPath}`);
+        return result.dbPath;
+    }
+    catch (err) {
+        console.error("[SwiftPrism MCP] SQLite import skipped:", err);
+        return undefined;
+    }
+}
 function loadGraphIntoMemory() {
     const paths = resolveProjectPaths();
     if (!paths)
         return false;
     try {
+        // Prefer SQLite SoT when available (or freshly imported).
+        const dbPath = ensureSqliteBesideJson(paths);
+        if (dbPath) {
+            _graphDb?.close();
+            _graphDb = new GraphDatabase(dbPath, true);
+            const mem = _graphDb.loadAllIntoMemory();
+            _graphNodes = mem.nodes;
+            _nodeById = mem.nodeById;
+            _callerIndex = mem.callerIndex;
+            _graphLoaded = true;
+            console.error(`[SwiftPrism MCP] Graph loaded from SQLite: ${mem.nodes.length} nodes, ${mem.callerIndex.size} reverse links (${path.basename(dbPath)})`);
+            return true;
+        }
         const raw = fs.readFileSync(paths.graphPath, "utf-8");
         const parsed = JSON.parse(raw);
         const nodes = Array.isArray(parsed) ? parsed : parsed.nodes ?? [];
         _graphNodes = nodes;
         _nodeById = new Map(nodes.map((n) => [n.id, n]));
-        // Build reverse caller index for O(1) findCallers
         _callerIndex = new Map();
         for (const n of nodes) {
             for (const callId of [...(n.calls ?? []), ...(n.inits ?? []), ...(n.deinits ?? [])]) {
@@ -148,7 +187,7 @@ function loadGraphIntoMemory() {
             }
         }
         _graphLoaded = true;
-        console.error(`[SwiftPrism MCP] Graph loaded: ${nodes.length} nodes, ${_callerIndex.size} reverse links`);
+        console.error(`[SwiftPrism MCP] Graph loaded from JSON: ${nodes.length} nodes, ${_callerIndex.size} reverse links`);
         return true;
     }
     catch (err) {
@@ -972,6 +1011,18 @@ server.tool("search_symbols", {
     flavor: z.string().optional().describe("Filter by flavor (class, function, variable, etc.)"),
     limit: z.number().default(10).describe("Max results"),
 }, async ({ query, flavor, limit }) => {
+    if (!_graphLoaded)
+        loadGraphIntoMemory();
+    // Prefer indexed SQL search when SQLite SoT is open.
+    if (_graphDb) {
+        const results = _graphDb.searchSymbols(query, flavor, limit);
+        return {
+            content: [{
+                    type: "text",
+                    text: JSON.stringify({ query, resultCount: results.length, source: "sqlite", results }, null, 2),
+                }],
+        };
+    }
     const loader = getFragmentLoader();
     const queryLower = query.toLowerCase();
     const results = [];
@@ -1007,7 +1058,7 @@ server.tool("search_symbols", {
     return {
         content: [{
                 type: "text",
-                text: JSON.stringify({ query, resultCount: results.length, results }, null, 2),
+                text: JSON.stringify({ query, resultCount: results.length, source: "json", results }, null, 2),
             }],
     };
 });
@@ -1064,6 +1115,35 @@ server.tool("get_logical_cluster", {
 // get_project_summary — High-level overview for token-efficient entry point
 // ═══════════════════════════════════════════════════════════════════════════════
 server.tool("get_project_summary", {}, async () => {
+    if (!_graphLoaded)
+        loadGraphIntoMemory();
+    if (_graphDb) {
+        const flavorCounts = _graphDb.flavorCounts();
+        const targets = _graphDb.targets();
+        const totalNodes = _graphDb.nodeCount();
+        const meta = loadMetaSummaries();
+        return {
+            content: [{
+                    type: "text",
+                    text: JSON.stringify({
+                        source: "sqlite",
+                        sqlite: path.basename(_graphDb.dbPath),
+                        schemaVersion: _graphDb.meta("schemaVersion"),
+                        generatedAt: _graphDb.meta("generatedAt"),
+                        totalNodes,
+                        edgeCount: _graphDb.edgeCount(),
+                        flavorCounts,
+                        targets,
+                        ...(meta
+                            ? {
+                                fileSummaryCount: Object.keys(meta.files).length,
+                                targetSummaryCount: Object.keys(meta.targets).length,
+                            }
+                            : {}),
+                    }, null, 2),
+                }],
+        };
+    }
     const loader = getFragmentLoader();
     // Count by flavor
     const flavorCounts = {};
