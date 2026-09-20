@@ -129,6 +129,7 @@ build_mcp_server() {
     cat > "$HIDDEN_DIR/swiftprism-config.json" <<CFGEOF
 {
   "graphPath": "$HIDDEN_DIR/prism-context.json",
+  "sqlitePath": "$HIDDEN_DIR/graph.sqlite",
   "contextsDir": "$HIDDEN_DIR/contexts",
   "mcpServer": "$PROJECT_ROOT/mcp-server/dist/server.js",
   "extensionBin": "$PROJECT_ROOT/extension/bin/swift-prism-analyzer"
@@ -307,6 +308,14 @@ generate_context() {
         " 2>/dev/null && \
             print_done "Fragments written → $HIDDEN_DIR/fragments/" || \
             print_warn "Fragmentation skipped (non-critical)"
+    fi
+
+    # SQLite SoT for MCP queries (JSON remains for analyzer/webview interchange)
+    if [ -f "$CONTEXT_OUT" ] && [ -f "$SCRIPT_DIR/mcp-server/dist/graph-db.js" ]; then
+        print_step "Importing graph into SQLite"
+        node "$SCRIPT_DIR/mcp-server/dist/graph-db.js" import "$CONTEXT_OUT" "$HIDDEN_DIR/graph.sqlite" \
+            && print_done "graph.sqlite → $HIDDEN_DIR/" \
+            || print_warn "SQLite import skipped (non-critical)"
     fi
 }
 
