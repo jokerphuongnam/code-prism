@@ -60,3 +60,13 @@ core/           SwiftSyntax analyzer
 backends/       Plugin contract notes
 run.sh          Build helper
 ```
+
+## Cache SoT (not in user project)
+
+Prefer writing analyzer output to:
+
+```text
+~/Library/Caches/code-prism/swift/<projectKey>/
+```
+
+Use Mac app / a wrapper to place files there. **mcp-prism** resolves `PRISM_CWD` → this cache.
