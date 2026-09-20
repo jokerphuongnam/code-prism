@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+export PRISM_EXTS="${PRISM_EXTS:-kt,kts}"
+exec node "$DIR/src/build-sot.mjs" "$@"
