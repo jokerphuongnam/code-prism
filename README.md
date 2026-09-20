@@ -1,9 +1,7 @@
 # go-prism
 
-Code Prism **language backend** for **go**.
+Writes SoT to `~/Library/Caches/code-prism/go/<projectKey>/` (not into the user project).
 
 ```bash
-./bin/go-prism --root /path/to/project --out /path/to/project/.codeprism/prism-context.json
+./bin/go-prism --root /path/to/user/project
 ```
-
-Lives under `code-prism/backends/` with other `*-prism` repos. SoT is read by mcp-prism / Mac UI / VS Code.
