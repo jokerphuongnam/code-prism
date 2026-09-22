@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+export CODE_PRISM_LANG="${CODE_PRISM_LANG:-go}"
+export PRISM_EXTS="${PRISM_EXTS:-go}"
+exec node "$DIR/index.mjs" --lang go "$@"

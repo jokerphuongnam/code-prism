@@ -1,0 +1,12 @@
+{
+  "id": "rust",
+  "name": "Rust",
+  "bin": "rust-prism",
+  "extensions": [
+    "rs"
+  ],
+  "markers": [
+    "Cargo.toml"
+  ],
+  "version": "0.1.0"
+}

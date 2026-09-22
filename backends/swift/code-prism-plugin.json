@@ -1,0 +1,8 @@
+{
+  "id": "swift",
+  "name": "Swift",
+  "bin": "swift-prism-analyzer",
+  "extensions": ["swift"],
+  "markers": ["Package.swift"],
+  "version": "0.1.0"
+}
