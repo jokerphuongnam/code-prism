@@ -1,0 +1,12 @@
+{
+  "id": "marlin",
+  "name": "Marlin",
+  "bin": "marlin-prism",
+  "extensions": [
+    "marlin"
+  ],
+  "markers": [
+    "Application.marlin"
+  ],
+  "version": "0.1.0"
+}
