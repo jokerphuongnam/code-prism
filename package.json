@@ -1,0 +1,7 @@
+{
+  "name": "code-prism",
+  "private": true,
+  "description": "Code Prism monorepo — core + language backends",
+  "workspaces": ["core"],
+  "engines": { "node": ">=20" }
+}

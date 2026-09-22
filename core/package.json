@@ -1,0 +1,11 @@
+{
+  "name": "@code-prism/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Code Prism backend core — SoT builder protocol for language plugins",
+  "exports": {
+    ".": "./src/index.mjs"
+  },
+  "engines": { "node": ">=20" }
+}
