@@ -1,8 +1,0 @@
-{
-  "name": "objective-c-prism",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
-  "bin": { "objective-c-prism": "./bin/objective-c-prism" },
-  "description": "Code Prism backend for objc — writes SoT to Library/Caches/code-prism"
-}

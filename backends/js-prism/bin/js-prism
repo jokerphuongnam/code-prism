@@ -1,6 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-DIR="$(cd "$(dirname "$0")/.." && pwd)"
-export PRISM_EXTS="${PRISM_EXTS:-js,jsx,ts,tsx,mjs,cjs}"
-export CODE_PRISM_LANG="${CODE_PRISM_LANG:-js}"
-exec node "$DIR/src/build-sot.mjs" --lang js "$@"

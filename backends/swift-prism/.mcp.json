@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "swift-prism": {
-      "command": "node",
-      "args": ["mcp-server/dist/server.js"]
-    }
-  }
-}

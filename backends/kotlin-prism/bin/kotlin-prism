@@ -1,6 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-DIR="$(cd "$(dirname "$0")/.." && pwd)"
-export PRISM_EXTS="${PRISM_EXTS:-kt,kts}"
-export CODE_PRISM_LANG="${CODE_PRISM_LANG:-kotlin}"
-exec node "$DIR/src/build-sot.mjs" --lang "kotlin" "$@"

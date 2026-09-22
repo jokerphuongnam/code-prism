@@ -1,8 +1,0 @@
-{
-  "name": "go-prism",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
-  "bin": { "go-prism": "./bin/go-prism" },
-  "description": "Code Prism backend for go — writes .codeprism SoT"
-}

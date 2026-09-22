@@ -1,9 +1,0 @@
-{
-  "name": "marlin-prism",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
-  "bin": { "marlin-prism": "./bin/marlin-prism" },
-  "scripts": { "build": "node -e \"console.log('noop')\"" },
-  "description": "Code Prism backend for marlin — writes .codeprism SoT"
-}

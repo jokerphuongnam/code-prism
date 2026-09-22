@@ -1,9 +1,0 @@
-{
-  "name": "kotlin-prism",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
-  "bin": { "kotlin-prism": "./bin/kotlin-prism" },
-  "scripts": { "build": "node -e \"console.log('noop')\"" },
-  "description": "Code Prism backend for kotlin — writes .codeprism SoT"
-}
