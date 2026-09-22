@@ -1,0 +1,8 @@
+{
+  "name": "cpp-prism",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "cpp-prism": "./bin/cpp-prism" },
+  "description": "Code Prism backend for cpp — writes SoT to Library/Caches/code-prism"
+}
