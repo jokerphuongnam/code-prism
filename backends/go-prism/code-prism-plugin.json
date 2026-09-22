@@ -1,0 +1,8 @@
+{
+  "id": "go",
+  "name": "Go",
+  "bin": "go-prism",
+  "extensions": ["go"],
+  "markers": ["go.mod"],
+  "version": "0.1.0"
+}
