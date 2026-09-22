@@ -1,0 +1,11 @@
+core/.build
+core/.swiftpm
+extension/node_modules
+extension/out
+extension/dist-webview
+extension/webview/node_modules
+.vscode
+.claude
+.devcontainer
+.git
+*.md
