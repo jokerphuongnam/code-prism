@@ -1,8 +1,0 @@
-{
-  "id": "js",
-  "name": "JS/TS",
-  "bin": "js-prism",
-  "extensions": ["js","jsx","ts","tsx","mjs","cjs"],
-  "markers": ["package.json","tsconfig.json"],
-  "version": "0.1.0"
-}
