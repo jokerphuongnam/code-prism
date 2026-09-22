@@ -8,11 +8,7 @@ Language backends write a **system-cache SoT**; MCP / Mac / VS Code only **read*
 curl -fsSL https://raw.githubusercontent.com/jokerphuongnam/code-prism-cli/main/install.sh | bash
 ```
 
-That installs:
-
-- **`prism`** / **`prism-mcp`** → `~/bin`
-- **[mcp-prism](https://github.com/jokerphuongnam/mcp-prism)** (built)
-- language backends under `~/Documents/Code/code-prism/backends/`
+Installs `prism` + `prism-mcp`, builds [mcp-prism](https://github.com/jokerphuongnam/mcp-prism), and clones **this monorepo** (core + all stock backends).
 
 Requires **Node.js ≥ 20**, `git`, `npm`.
 
@@ -24,32 +20,38 @@ prism analyze --root /path/to/project
 prism-mcp .        # point an MCP client at this
 ```
 
-MCP client:
+## Monorepo layout
 
-```json
-{
-  "mcpServers": {
-    "code-prism": {
-      "command": "prism-mcp",
-      "args": ["."]
-    }
-  }
-}
+```text
+core/                 # @code-prism/core — shared SoT builder (createBackend)
+backends/
+  js/ marlin/ …       # thin adapters from core
+  swift/              # native analyzer (same plugin protocol)
+docs/
+  PROTOCOL.md         # normative CLI + SoT contract
+  CUSTOM_BACKEND.md   # how to add your own language
 ```
 
-## Repos
+Stock languages: `js`, `marlin`, `kotlin`, `rust`, `go`, `cpp`, `objc`, `swift`.
+
+### Custom backends
+
+You are **not** limited to stock langs. Implement the [protocol](./docs/PROTOCOL.md) via [`createBackend`](./docs/CUSTOM_BACKEND.md) (or a native binary with the same CLI + manifest). Drop it under `backends/<id>/` or `~/Library/Application Support/CodePrism/backends/<id>/` — Prism discovers it automatically.
+
+## Other repos
 
 | Repo | Role |
 |------|------|
-| [code-prism-cli](https://github.com/jokerphuongnam/code-prism-cli) | `prism` + `prism-mcp` + install script |
-| [mcp-prism](https://github.com/jokerphuongnam/mcp-prism) | MCP server over SoT cache |
-| [code-prism-app-mac](https://github.com/jokerphuongnam/code-prism-app-mac) | macOS graph viewer |
+| [code-prism-cli](https://github.com/jokerphuongnam/code-prism-cli) | `prism` / `prism-mcp` + install |
+| [mcp-prism](https://github.com/jokerphuongnam/mcp-prism) | MCP over SoT |
+| [code-prism-app-mac](https://github.com/jokerphuongnam/code-prism-app-mac) | macOS graph UI |
 | [code-prism-vs-code](https://github.com/jokerphuongnam/code-prism-vs-code) | VS Code extension |
-| `*-prism` backends | `js`, `marlin`, `kotlin`, `rust`, `go`, `cpp`, `objective-c`, `swift` |
 
-## Cache layout
+Legacy per-lang repos (`js-prism`, `marlin-prism`, …) are **deprecated** — use this monorepo.
 
-See [CACHE.md](./CACHE.md). Plugins discovery: [PLUGINS.md](./PLUGINS.md).
+## Cache
+
+See [CACHE.md](./CACHE.md). Plugin discovery: [PLUGINS.md](./PLUGINS.md).
 
 ```text
 ~/Library/Caches/code-prism/
