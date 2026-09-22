@@ -1,0 +1,21 @@
+{
+  "name": "SwiftPrism Dev",
+  "dockerComposeFile": "../docker-compose.yml",
+  "service": "swift-prism",
+  "workspaceFolder": "/app",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "sswg.swift-lang",
+        "dbaeumer.vscode-eslint"
+      ],
+      "settings": {
+        "swift.path": "/usr",
+        "typescript.tsdk": "extension/node_modules/typescript/lib"
+      }
+    }
+  },
+  "forwardPorts": [5173],
+  "postCreateCommand": "cd /app/extension && npm run install:all",
+  "remoteUser": "node"
+}

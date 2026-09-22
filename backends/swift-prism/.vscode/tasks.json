@@ -1,0 +1,76 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "SwiftPrism: Full Build (Docker)",
+      "type": "shell",
+      "command": "./run.sh",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "SwiftPrism: Build Extension Only",
+      "type": "shell",
+      "command": "cd extension && npm run build",
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": ["$tsc"]
+    },
+    {
+      "label": "SwiftPrism: Build Swift Core Only",
+      "type": "shell",
+      "command": "cd core && swift build -c release && cp .build/release/swift-prism-analyzer ../extension/bin/swift-prism-analyzer",
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "SwiftPrism: Watch Extension",
+      "type": "shell",
+      "command": "cd extension && npm run watch",
+      "group": "build",
+      "isBackground": true,
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      },
+      "problemMatcher": ["$tsc-watch"]
+    },
+    {
+      "label": "SwiftPrism: Docker Up",
+      "type": "shell",
+      "command": "docker compose up --build -d",
+      "group": "none",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "SwiftPrism: Docker Down",
+      "type": "shell",
+      "command": "docker compose down",
+      "group": "none",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    }
+  ]
+}
