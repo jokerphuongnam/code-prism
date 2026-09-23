@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Shim: prefer built analyzer from legacy/swift checkout or App Support.
+set -euo pipefail
+CANDIDATES=(
+  "$HOME/Library/Application Support/CodePrism/backends/swift/swift-prism-analyzer"
+  "$(cd "$(dirname "$0")/../../.legacy-backends/swift-prism" 2>/dev/null && pwd)/core/.build/release/swift-prism-analyzer"
+  "$(cd "$(dirname "$0")/../../.legacy-backends/swift-prism" 2>/dev/null && pwd)/extension/bin/swift-prism-analyzer"
+  "/Users/phuongnampham/Documents/Code/code-prism/backends/swift-prism/core/.build/release/swift-prism-analyzer"
+  "/Users/phuongnampham/Documents/Code/code-prism/.legacy-backends/swift-prism/core/.build/release/swift-prism-analyzer"
+  "/Users/phuongnampham/Documents/Code/code-prism/.legacy-backends/swift-prism/extension/bin/swift-prism-analyzer"
+)
+for c in "${CANDIDATES[@]}"; do
+  if [[ -x "$c" ]]; then
+    exec "$c" "$@"
+  fi
+done
+echo "error: swift-prism-analyzer not found. Build swift backend (see backends/swift/README.md)" >&2
+exit 127
