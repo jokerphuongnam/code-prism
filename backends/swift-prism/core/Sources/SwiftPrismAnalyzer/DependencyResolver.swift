@@ -39,7 +39,11 @@ struct DependencyResolver {
         for sym in symbols where sym.parent == "EnvironmentValues" {
             envValuesByName[sym.name, default: []].append(sym)
         }
-        let symbolById = Dictionary(uniqueKeysWithValues: symbols.map { ($0.id, $0) })
+        var symbolById: [String: SymbolInfo] = [:]
+        symbolById.reserveCapacity(symbols.count)
+        for sym in symbols where symbolById[sym.id] == nil {
+            symbolById[sym.id] = sym
+        }
         var enumCaseToType: [String: String] = [:]
         for sym in symbols where sym.flavor == .variable && sym.parent != nil {
             if let parentSym = symbolById[sym.parent!], parentSym.flavor == .enum {
