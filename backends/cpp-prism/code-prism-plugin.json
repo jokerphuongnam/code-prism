@@ -1,0 +1,8 @@
+{
+  "id": "cpp",
+  "name": "C/C++",
+  "bin": "cpp-prism",
+  "extensions": ["c","cc","cpp","cxx","h","hh","hpp","hxx"],
+  "markers": ["CMakeLists.txt","compile_commands.json"],
+  "version": "0.1.0"
+}
