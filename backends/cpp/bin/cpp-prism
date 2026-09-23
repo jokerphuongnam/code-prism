@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-export CODE_PRISM_LANG="${CODE_PRISM_LANG:-cpp}"
 export PRISM_EXTS="${PRISM_EXTS:-c,cc,cpp,cxx,h,hh,hpp,hxx}"
+export CODE_PRISM_LANG="${CODE_PRISM_LANG:-cpp}"
+EXTRACT="${PRISM_EXTRACT:-$HOME/bin/prism-extract}"
+if [[ -x "$EXTRACT" ]]; then
+  exec "$EXTRACT" --lang "cpp" "$@"
+fi
 exec node "$DIR/index.mjs" --lang cpp "$@"
