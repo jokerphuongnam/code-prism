@@ -1,0 +1,8 @@
+{
+  "id": "kotlin",
+  "name": "Kotlin",
+  "bin": "kotlin-prism",
+  "extensions": ["kt","kts"],
+  "markers": ["build.gradle.kts","build.gradle"],
+  "version": "0.1.0"
+}
