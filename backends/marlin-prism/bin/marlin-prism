@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+export PRISM_EXTS="${PRISM_EXTS:-marlin}"
+export CODE_PRISM_LANG="${CODE_PRISM_LANG:-marlin}"
+EXTRACT="${PRISM_EXTRACT:-$HOME/bin/prism-extract}"
+if [[ -x "$EXTRACT" ]]; then
+  exec "$EXTRACT" --lang "marlin" "$@"
+fi
+exec node "$DIR/src/build-sot.mjs" --lang marlin "$@"
