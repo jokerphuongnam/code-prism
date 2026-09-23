@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-export CODE_PRISM_LANG="${CODE_PRISM_LANG:-kotlin}"
 export PRISM_EXTS="${PRISM_EXTS:-kt,kts}"
+export CODE_PRISM_LANG="${CODE_PRISM_LANG:-kotlin}"
+EXTRACT="${PRISM_EXTRACT:-$HOME/bin/prism-extract}"
+if [[ -x "$EXTRACT" ]]; then
+  exec "$EXTRACT" --lang "kotlin" "$@"
+fi
 exec node "$DIR/index.mjs" --lang kotlin "$@"
