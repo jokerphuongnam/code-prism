@@ -1,0 +1,9 @@
+{
+  "name": "js-prism",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "js-prism": "./bin/js-prism" },
+  "scripts": { "build": "node -e \"console.log('noop')\"" },
+  "description": "Code Prism backend for js — writes .codeprism SoT"
+}
