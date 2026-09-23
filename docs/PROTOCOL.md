@@ -69,6 +69,9 @@ Placed next to the backend entry (discovered under `code-prism/backends/<id>/`):
 }
 ```
 
+
+Backends also write `schemaVersion: 5.0-nested` and `node`: one project node whose `nodes` are archipelagos (Xcode project, target, Cargo crate, SPM package). Only leaves (`kind: leaf`) are functions and objects. A `call` stays inside an archipelago. A `depends` points at `island:<project>` instead of a function in another project.
+
 After `prism analyze`, the CLI may **stamp** island/project parents onto this graph.
 
 ## 4. Discovery

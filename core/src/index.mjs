@@ -9,6 +9,7 @@ import { cacheDir, langPrismFolder, projectHash, projectSlug } from "./cache.mjs
 import { parseArgs } from "./cli.mjs";
 import { defaultExtractSignatures } from "./extract.mjs";
 import { walk } from "./walk.mjs";
+import { stampContext } from "./stamp.mjs";
 
 /**
  * @param {object} config
@@ -75,7 +76,8 @@ export function createBackend(config) {
       assetMap: [],
       macroMap: [],
     };
-    fs.writeFileSync(outPath, JSON.stringify(doc, null, 2));
+    fs.writeFileSync(outPath, JSON.stringify(doc));
+    stampContext(outPath, realRoot);
     const meta = {
       projectRoot: realRoot,
       language: lang,
