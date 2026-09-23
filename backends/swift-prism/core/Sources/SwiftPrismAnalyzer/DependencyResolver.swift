@@ -1,3 +1,4 @@
+import Foundation
 import SwiftSyntax
 
 struct DependencyResolver {
@@ -33,172 +34,56 @@ struct DependencyResolver {
         var links: [Link] = []
         var seen: Set<String> = []
         let obsMap = buildObserverMap()
-
-        for (filePath, tree) in fileSources {
-            let bodyFinder = BodyFinder()
-            bodyFinder.walk(tree)
-
-            for symbol in symbols {
-                if publicOnlyTargets.contains(symbol.targetName ?? "") && symbol.access == .private || symbol.access == .fileprivate {
-                    continue
-                }
-
-                guard let bodyNode = bodyFinder.bodies[symbol.id] else { continue }
-                let collector = CallCollector(knownSymbols: knownNames, filePath: filePath)
-                collector.walk(bodyNode)
-
-                var refsByTarget: [String: [CallSiteRef]] = [:]
-
-                for call in collector.calls {
-                    let ref = CallSiteRef(line: call.line, column: call.column, snippet: call.snippet, file: call.file)
-
-                    if let targetID = resolveQualifiedCall(call: call, nameToID: nameToID, qualifiedMap: qualifiedMap, callerParent: symbol.parent), targetID != symbol.id {
-                        let resolvedTarget = symbolTargetMap[targetID]
-                        let isExternalSymbol = resolvedTarget.flatMap { t in externalTargetNames.contains(t) } ?? false
-
-                        if isExternalSymbol, let t = resolvedTarget {
-                            refsByTarget[t, default: []].append(ref)
-                        } else {
-                            refsByTarget[targetID, default: []].append(ref)
-                        }
-                    } else if let externalTarget = resolveToExternalTarget(call: call, callerParent: symbol.parent) {
-                        refsByTarget[externalTarget, default: []].append(ref)
-                    }
-                }
-
-                for (targetID, refs) in refsByTarget {
-                    let sourceTarget = symbolTargetMap[symbol.id]
-                    let destTarget = symbolTargetMap[targetID]
-                    let isCrossTarget = sourceTarget != nil && destTarget != nil && sourceTarget != destTarget
-
-                    if isCrossTarget {
-                        let key = "\(symbol.id)->\(targetID):cross_target_dependency"
-                        if seen.insert(key).inserted {
-                            links.append(Link(sourceId: symbol.id, targetId: targetID, type: .crossTargetDependency, confidence: nil, references: refs))
-                        }
-                    } else {
-                        let baseType = determineLinkType(call: CallRef(callee: "", isQualified: false, qualifier: nil, callSignature: nil, line: 0, column: 0, snippet: "", file: ""), targetID: targetID)
-                        if baseType == .access {
-                            for resolved in resolveAccessTarget(targetID: targetID, observerMap: obsMap) {
-                                let key = "\(symbol.id)->\(resolved.id):\(resolved.type.rawValue)"
-                                if seen.insert(key).inserted {
-                                    links.append(Link(sourceId: symbol.id, targetId: resolved.id, type: resolved.type, confidence: nil, references: refs))
-                                }
-                            }
-                        } else {
-                            let key = "\(symbol.id)->\(targetID):\(baseType.rawValue)"
-                            if seen.insert(key).inserted {
-                                links.append(Link(sourceId: symbol.id, targetId: targetID, type: baseType, confidence: nil, references: refs))
-                            }
-                        }
-                    }
-                }
-
-                collectObserverTriggerLinks(symbol: symbol, bodyNode: bodyNode, nameToID: nameToID, seen: &seen, links: &links)
+        let symbolsByFile = Dictionary(grouping: symbols, by: \.location.file)
+        var envValuesByName: [String: [SymbolInfo]] = [:]
+        for sym in symbols where sym.parent == "EnvironmentValues" {
+            envValuesByName[sym.name, default: []].append(sym)
+        }
+        let symbolById = Dictionary(uniqueKeysWithValues: symbols.map { ($0.id, $0) })
+        var enumCaseToType: [String: String] = [:]
+        for sym in symbols where sym.flavor == .variable && sym.parent != nil {
+            if let parentSym = symbolById[sym.parent!], parentSym.flavor == .enum {
+                enumCaseToType[sym.name] = parentSym.id
             }
+        }
 
-            for symbol in symbols.filter({ $0.location.file == filePath }) {
-                guard let bodyNode = bodyFinder.bodies[symbol.id] else { continue }
-                let refCollector = ResourceRefCollector(filePath: filePath, knownResourceNames: resourceNames)
-                refCollector.walk(bodyNode)
-
-                for ref in refCollector.refs {
-                    guard let targetID = resourceNameToID[ref.resourceName] else { continue }
-                    let linkType: LinkType = ref.callContext.hasPrefix("heuristic") ? .heuristicLink : .resourceLink
-                    let key = "\(symbol.id)->\(targetID):\(linkType.rawValue)"
-                    if seen.insert(key).inserted {
-                        links.append(Link(sourceId: symbol.id, targetId: targetID, type: linkType, confidence: ref.confidence, references: nil))
-                    }
-                }
-            }
-
-            let staticCollector = StaticResourcePropertyCollector()
-            staticCollector.walk(tree)
-            for alias in staticCollector.aliases {
-                guard let targetID = resourceNameToID[alias.resourceName] else { continue }
-                let key = "\(alias.symbolId)->\(targetID):resource_alias"
+        let fileCount = fileSources.count
+        let lock = NSLock()
+        var fileBatches: [(Int, [Link])] = []
+        fileBatches.reserveCapacity(fileCount)
+        DispatchQueue.concurrentPerform(iterations: fileCount) { index in
+            let (filePath, tree) = fileSources[index]
+            let batch = self.linksForFile(
+                filePath: filePath,
+                tree: tree,
+                localSymbols: symbolsByFile[filePath] ?? [],
+                knownNames: knownNames,
+                nameToID: nameToID,
+                qualifiedMap: qualifiedMap,
+                typeNames: typeNames,
+                resourceNameToID: resourceNameToID,
+                resourceNames: resourceNames,
+                resourceProviderTypes: resourceProviderTypes,
+                symbolTargetMap: symbolTargetMap,
+                macroNameSet: macroNameSet,
+                externalTargetNames: externalTargetNames,
+                obsMap: obsMap,
+                envValuesByName: envValuesByName,
+                enumCaseToType: enumCaseToType
+            )
+            lock.lock()
+            fileBatches.append((index, batch))
+            lock.unlock()
+        }
+        for batch in fileBatches.sorted(by: { $0.0 < $1.0 }) {
+            for link in batch.1 {
+                let key = "\(link.sourceId)->\(link.targetId):\(link.type.rawValue)"
                 if seen.insert(key).inserted {
-                    links.append(Link(sourceId: alias.symbolId, targetId: targetID, type: .resourceAlias, confidence: .high, references: nil))
-                }
-            }
-
-            for providerType in resourceProviderTypes {
-                let membersOfProvider = symbols.filter { $0.parent == providerType }
-                for member in membersOfProvider {
-                    guard let bodyNode = bodyFinder.bodies[member.id] else { continue }
-                    let refCollector = ResourceRefCollector(filePath: filePath, knownResourceNames: resourceNames)
-                    refCollector.walk(bodyNode)
-
-                    for ref in refCollector.refs {
-                        guard let targetID = resourceNameToID[ref.resourceName] else { continue }
-                        let key = "\(member.id)->\(targetID):resource_link:provider"
-                        if seen.insert(key).inserted {
-                            links.append(Link(sourceId: member.id, targetId: targetID, type: .resourceLink, confidence: .high, references: nil))
-                        }
-                    }
-                }
-            }
-
-            let macroCollector = MacroCollector(filePath: filePath)
-            macroCollector.walk(tree)
-            for app in macroCollector.macroApplications {
-                if macroNameSet.contains(app.macroName) {
-                    let key = "\(app.symbolId)->\(app.macroName):macro_expansion"
-                    if seen.insert(key).inserted {
-                        links.append(Link(sourceId: app.macroName, targetId: app.symbolId, type: .macroExpansion, confidence: .high, references: nil))
-                    }
-                }
-            }
-
-            let inheritanceCollector = InheritanceCollector(knownTypeNames: typeNames)
-            inheritanceCollector.walk(tree)
-            for ref in inheritanceCollector.refs {
-                let key = "\(ref.declId)->\(ref.inheritedName):\(ref.linkType.rawValue)"
-                if seen.insert(key).inserted {
-                    links.append(Link(sourceId: ref.declId, targetId: ref.inheritedName, type: ref.linkType, confidence: nil, references: nil))
-                }
-            }
-
-            let envCollector = EnvironmentCollector(filePath: filePath)
-            envCollector.walk(tree)
-            for ref in envCollector.refs {
-                switch ref.kind {
-                case .environmentObject, .environment:
-                    if let targetId = nameToID[ref.typeName] ?? typeNames.first(where: { $0 == ref.typeName }) {
-                        let key = "\(ref.consumerId)->\(targetId):environment_injection"
-                        if seen.insert(key).inserted {
-                            links.append(Link(sourceId: ref.consumerId, targetId: targetId, type: .environmentInjection, confidence: .medium, references: nil))
-                        }
-                    }
-                    if let keyPath = ref.keyPath {
-                        let envKeyName = keyPath.replacingOccurrences(of: "\\.", with: "").replacingOccurrences(of: "\\", with: "")
-                        for sym in symbols where sym.name == envKeyName && sym.parent == "EnvironmentValues" {
-                            let key = "\(ref.consumerId)->\(sym.id):environment_injection"
-                            if seen.insert(key).inserted {
-                                links.append(Link(sourceId: ref.consumerId, targetId: sym.id, type: .environmentInjection, confidence: .high, references: nil))
-                            }
-                        }
-                    }
-                case .providesObject:
-                    if let targetId = nameToID[ref.typeName] ?? typeNames.first(where: { $0 == ref.typeName }) {
-                        let key = "\(ref.consumerId)->\(targetId):environment_provider"
-                        if seen.insert(key).inserted {
-                            links.append(Link(sourceId: ref.consumerId, targetId: targetId, type: .environmentProvider, confidence: .medium, references: nil))
-                        }
-                    }
-                case .providesValue:
-                    if let keyPath = ref.keyPath {
-                        let envKeyName = keyPath.replacingOccurrences(of: "\\.", with: "").replacingOccurrences(of: "\\", with: "")
-                        for sym in symbols where sym.name == envKeyName && sym.parent == "EnvironmentValues" {
-                            let key = "\(ref.consumerId)->\(sym.id):environment_provider"
-                            if seen.insert(key).inserted {
-                                links.append(Link(sourceId: ref.consumerId, targetId: sym.id, type: .environmentProvider, confidence: .high, references: nil))
-                            }
-                        }
-                    }
+                    links.append(link)
                 }
             }
         }
+
 
         for sym in symbols {
             guard sym.flavor == .variable, let parent = sym.parent, let typeName = sym.resolvedType else { continue }
@@ -206,38 +91,6 @@ struct DependencyResolver {
             let key = "\(parent)->\(targetId):holds_type:\(sym.name)"
             if seen.insert(key).inserted {
                 links.append(Link(sourceId: parent, targetId: targetId, type: .holdsType, confidence: .high, references: nil))
-            }
-        }
-
-        var enumCaseToType: [String: String] = [:]
-        for sym in symbols where sym.flavor == .variable && sym.parent != nil {
-            let parentSym = symbols.first { $0.id == sym.parent && $0.flavor == .enum }
-            if let parentSym {
-                enumCaseToType[sym.name] = parentSym.id
-            }
-        }
-
-        let staticMethodReturnTypes: [String: String] = [:]
-
-        for (filePath, tree) in fileSources {
-            let enumCollector = EnumUsageCollector(filePath: filePath)
-            enumCollector.walk(tree)
-
-            for usage in enumCollector.usages {
-                if let enumId = enumCaseToType[usage.memberName] {
-                    let key = "\(usage.callSiteId)->\(enumId):enum_usage:\(usage.memberName)"
-                    if seen.insert(key).inserted {
-                        links.append(Link(sourceId: usage.callSiteId, targetId: enumId, type: .enumUsage, confidence: .medium, references: nil))
-                    }
-                }
-
-                if let returnType = staticMethodReturnTypes[usage.memberName],
-                   let targetId = nameToID[returnType] ?? typeNames.first(where: { $0 == returnType }) {
-                    let key = "\(usage.callSiteId)->\(targetId):call:\(usage.memberName)"
-                    if seen.insert(key).inserted {
-                        links.append(Link(sourceId: usage.callSiteId, targetId: targetId, type: .call, confidence: .medium, references: nil))
-                    }
-                }
             }
         }
 
@@ -707,6 +560,190 @@ struct DependencyResolver {
             links.append(Link(sourceId: varID, targetId: symbol.id, type: .observerTrigger, confidence: nil, references: nil))
         }
     }
+
+    private func linksForFile(
+        filePath: String,
+        tree: SourceFileSyntax,
+        localSymbols: [SymbolInfo],
+        knownNames: Set<String>,
+        nameToID: [String: String],
+        qualifiedMap: [String: String],
+        typeNames: Set<String>,
+        resourceNameToID: [String: String],
+        resourceNames: Set<String>,
+        resourceProviderTypes: Set<String>,
+        symbolTargetMap: [String: String],
+        macroNameSet: Set<String>,
+        externalTargetNames: Set<String>,
+        obsMap: [String: [String]],
+        envValuesByName: [String: [SymbolInfo]],
+        enumCaseToType: [String: String]
+    ) -> [Link] {
+        var links: [Link] = []
+        var seen: Set<String> = []
+        let bodyFinder = BodyFinder()
+        bodyFinder.walk(tree)
+
+        for symbol in localSymbols {
+            if publicOnlyTargets.contains(symbol.targetName ?? "") && symbol.access == .private || symbol.access == .fileprivate {
+                continue
+            }
+            guard let bodyNode = bodyFinder.bodies[symbol.id] else { continue }
+            let collector = CallCollector(knownSymbols: knownNames, filePath: filePath)
+            collector.walk(bodyNode)
+            var refsByTarget: [String: [CallSiteRef]] = [:]
+            for call in collector.calls {
+                let ref = CallSiteRef(line: call.line, column: call.column, snippet: call.snippet, file: call.file)
+                if let targetID = resolveQualifiedCall(call: call, nameToID: nameToID, qualifiedMap: qualifiedMap, callerParent: symbol.parent), targetID != symbol.id {
+                    let resolvedTarget = symbolTargetMap[targetID]
+                    let isExternalSymbol = resolvedTarget.flatMap { externalTargetNames.contains($0) } ?? false
+                    if isExternalSymbol, let t = resolvedTarget {
+                        refsByTarget[t, default: []].append(ref)
+                    } else {
+                        refsByTarget[targetID, default: []].append(ref)
+                    }
+                } else if let externalTarget = resolveToExternalTarget(call: call, callerParent: symbol.parent) {
+                    refsByTarget[externalTarget, default: []].append(ref)
+                }
+            }
+            for (targetID, refs) in refsByTarget {
+                let sourceTarget = symbolTargetMap[symbol.id]
+                let destTarget = symbolTargetMap[targetID]
+                let isCrossTarget = sourceTarget != nil && destTarget != nil && sourceTarget != destTarget
+                if isCrossTarget {
+                    let key = "\(symbol.id)->\(targetID):cross_target_dependency"
+                    if seen.insert(key).inserted {
+                        links.append(Link(sourceId: symbol.id, targetId: targetID, type: .crossTargetDependency, confidence: nil, references: refs))
+                    }
+                } else {
+                    let baseType = determineLinkType(call: CallRef(callee: "", isQualified: false, qualifier: nil, callSignature: nil, line: 0, column: 0, snippet: "", file: ""), targetID: targetID)
+                    if baseType == .access {
+                        for resolved in resolveAccessTarget(targetID: targetID, observerMap: obsMap) {
+                            let key = "\(symbol.id)->\(resolved.id):\(resolved.type.rawValue)"
+                            if seen.insert(key).inserted {
+                                links.append(Link(sourceId: symbol.id, targetId: resolved.id, type: resolved.type, confidence: nil, references: refs))
+                            }
+                        }
+                    } else {
+                        let key = "\(symbol.id)->\(targetID):\(baseType.rawValue)"
+                        if seen.insert(key).inserted {
+                            links.append(Link(sourceId: symbol.id, targetId: targetID, type: baseType, confidence: nil, references: refs))
+                        }
+                    }
+                }
+            }
+            collectObserverTriggerLinks(symbol: symbol, bodyNode: bodyNode, nameToID: nameToID, seen: &seen, links: &links)
+        }
+
+        for symbol in localSymbols {
+            guard let bodyNode = bodyFinder.bodies[symbol.id] else { continue }
+            let refCollector = ResourceRefCollector(filePath: filePath, knownResourceNames: resourceNames)
+            refCollector.walk(bodyNode)
+            for ref in refCollector.refs {
+                guard let targetID = resourceNameToID[ref.resourceName] else { continue }
+                let linkType: LinkType = ref.callContext.hasPrefix("heuristic") ? .heuristicLink : .resourceLink
+                let key = "\(symbol.id)->\(targetID):\(linkType.rawValue)"
+                if seen.insert(key).inserted {
+                    links.append(Link(sourceId: symbol.id, targetId: targetID, type: linkType, confidence: ref.confidence, references: nil))
+                }
+            }
+        }
+
+        let staticCollector = StaticResourcePropertyCollector()
+        staticCollector.walk(tree)
+        for alias in staticCollector.aliases {
+            guard let targetID = resourceNameToID[alias.resourceName] else { continue }
+            let key = "\(alias.symbolId)->\(targetID):resource_alias"
+            if seen.insert(key).inserted {
+                links.append(Link(sourceId: alias.symbolId, targetId: targetID, type: .resourceAlias, confidence: .high, references: nil))
+            }
+        }
+
+        for providerType in resourceProviderTypes {
+            for member in localSymbols where member.parent == providerType {
+                guard let bodyNode = bodyFinder.bodies[member.id] else { continue }
+                let refCollector = ResourceRefCollector(filePath: filePath, knownResourceNames: resourceNames)
+                refCollector.walk(bodyNode)
+                for ref in refCollector.refs {
+                    guard let targetID = resourceNameToID[ref.resourceName] else { continue }
+                    let key = "\(member.id)->\(targetID):resource_link:provider"
+                    if seen.insert(key).inserted {
+                        links.append(Link(sourceId: member.id, targetId: targetID, type: .resourceLink, confidence: .high, references: nil))
+                    }
+                }
+            }
+        }
+
+        let macroCollector = MacroCollector(filePath: filePath)
+        macroCollector.walk(tree)
+        for app in macroCollector.macroApplications where macroNameSet.contains(app.macroName) {
+            let key = "\(app.symbolId)->\(app.macroName):macro_expansion"
+            if seen.insert(key).inserted {
+                links.append(Link(sourceId: app.macroName, targetId: app.symbolId, type: .macroExpansion, confidence: .high, references: nil))
+            }
+        }
+
+        let inheritanceCollector = InheritanceCollector(knownTypeNames: typeNames)
+        inheritanceCollector.walk(tree)
+        for ref in inheritanceCollector.refs {
+            let key = "\(ref.declId)->\(ref.inheritedName):\(ref.linkType.rawValue)"
+            if seen.insert(key).inserted {
+                links.append(Link(sourceId: ref.declId, targetId: ref.inheritedName, type: ref.linkType, confidence: nil, references: nil))
+            }
+        }
+
+        let envCollector = EnvironmentCollector(filePath: filePath)
+        envCollector.walk(tree)
+        for ref in envCollector.refs {
+            switch ref.kind {
+            case .environmentObject, .environment:
+                if let targetId = nameToID[ref.typeName] ?? typeNames.first(where: { $0 == ref.typeName }) {
+                    let key = "\(ref.consumerId)->\(targetId):environment_injection"
+                    if seen.insert(key).inserted {
+                        links.append(Link(sourceId: ref.consumerId, targetId: targetId, type: .environmentInjection, confidence: .medium, references: nil))
+                    }
+                }
+                if let keyPath = ref.keyPath {
+                    let envKeyName = keyPath.replacingOccurrences(of: "\\.", with: "").replacingOccurrences(of: "\\", with: "")
+                    for sym in envValuesByName[envKeyName] ?? [] {
+                        let key = "\(ref.consumerId)->\(sym.id):environment_injection"
+                        if seen.insert(key).inserted {
+                            links.append(Link(sourceId: ref.consumerId, targetId: sym.id, type: .environmentInjection, confidence: .high, references: nil))
+                        }
+                    }
+                }
+            case .providesObject:
+                if let targetId = nameToID[ref.typeName] ?? typeNames.first(where: { $0 == ref.typeName }) {
+                    let key = "\(ref.consumerId)->\(targetId):environment_provider"
+                    if seen.insert(key).inserted {
+                        links.append(Link(sourceId: ref.consumerId, targetId: targetId, type: .environmentProvider, confidence: .medium, references: nil))
+                    }
+                }
+            case .providesValue:
+                if let keyPath = ref.keyPath {
+                    let envKeyName = keyPath.replacingOccurrences(of: "\\.", with: "").replacingOccurrences(of: "\\", with: "")
+                    for sym in envValuesByName[envKeyName] ?? [] {
+                        let key = "\(ref.consumerId)->\(sym.id):environment_provider"
+                        if seen.insert(key).inserted {
+                            links.append(Link(sourceId: ref.consumerId, targetId: sym.id, type: .environmentProvider, confidence: .high, references: nil))
+                        }
+                    }
+                }
+            }
+        }
+
+        let enumCollector = EnumUsageCollector(filePath: filePath)
+        enumCollector.walk(tree)
+        for usage in enumCollector.usages {
+            if let enumId = enumCaseToType[usage.memberName] {
+                let key = "\(usage.callSiteId)->\(enumId):enum_usage:\(usage.memberName)"
+                if seen.insert(key).inserted {
+                    links.append(Link(sourceId: usage.callSiteId, targetId: enumId, type: .enumUsage, confidence: .medium, references: nil))
+                }
+            }
+        }
+        return links
+    }
 }
 
 private final class BodyFinder: SyntaxVisitor {
@@ -791,6 +828,7 @@ private final class BodyFinder: SyntaxVisitor {
         }
         return "(\(labels.joined()))"
     }
+
 }
 
 private final class MainAttrChecker: SyntaxVisitor {
