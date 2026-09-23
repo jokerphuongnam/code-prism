@@ -1,0 +1,13 @@
+{
+  "id": "objc",
+  "name": "Objective-C",
+  "bin": "objective-c-prism",
+  "extensions": [
+    "m",
+    "mm",
+    "h"
+  ],
+  "markers": [],
+  "version": "0.1.0",
+  "cacheFolder": "objective-c-prism"
+}
