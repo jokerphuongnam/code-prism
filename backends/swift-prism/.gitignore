@@ -1,0 +1,85 @@
+
+# ── SwiftPrism Hidden Data ──────────────────────────────────────
+.swiftprism/
+
+# ── OS Artifacts ─────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+
+# ── IDE & Editor Caches ─────────────────────────────────────────
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# ── VS Code (selective) ─────────────────────────────────────────
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/extensions.json
+
+# ── AI Agent Configs (always tracked) ────────────────────────────
+!.cursorrules
+!.clauderules
+!CLAUDE.md
+
+# ── Claude Code Agent ───────────────────────────────────────────
+.claude/*
+!.claude/settings.json
+
+# ── Security & Secrets ──────────────────────────────────────────
+.env
+.env.*
+!.env.example
+secrets.*
+*.pem
+*.key
+*.p12
+*.cer
+
+# ── Docker ───────────────────────────────────────────────────────
+docker-compose.override.yml
+.docker/
+
+# ── Swift / SPM ──────────────────────────────────────────────────
+core/.build/
+core/.swiftpm/
+core/*.xcodeproj/
+core/*.xcworkspace/
+!core/*.xcworkspace/xcshareddata/
+core/DerivedData/
+core/Packages/
+core/.index-build/
+
+# ── Node / Extension Host ───────────────────────────────────────
+extension/node_modules/
+extension/out/
+extension/dist-webview/
+extension/bin/
+extension/*.vsix
+extension/.vscode-test/
+extension/webview/node_modules/
+
+# ── Vite / Build Artifacts ──────────────────────────────────────
+extension/webview/dist/
+
+# ── Test & Coverage ──────────────────────────────────────────────
+*.lcov
+coverage/
+.nyc_output/
+test-results/
+
+# ── Logs ─────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+
+# ── Generated Context (rebuild via run.sh) ──────────────────────
+prism-context.json
+swiftprism-config.json
+node_modules
+package-lock.json
+settings.json
+xcuserdata/

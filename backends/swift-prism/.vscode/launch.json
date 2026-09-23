@@ -1,0 +1,40 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run SwiftPrism Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/extension",
+        "--clear-data"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/extension/out/**/*.js"
+      ],
+      "preLaunchTask": "SwiftPrism: Build Extension Only"
+    },
+    {
+      "name": "Run SwiftPrism (Watch Mode)",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/extension"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/extension/out/**/*.js"
+      ],
+      "preLaunchTask": "SwiftPrism: Watch Extension"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder}/core",
+      "name": "Debug SwiftPrismAnalyzer",
+      "target": "SwiftPrismAnalyzer",
+      "configuration": "debug",
+      "preLaunchTask": "SwiftPrism: Build Swift Core Only"
+    }
+  ]
+}
