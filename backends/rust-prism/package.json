@@ -1,0 +1,8 @@
+{
+  "name": "rust-prism",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "rust-prism": "./bin/rust-prism" },
+  "description": "Code Prism backend for rust — writes .codeprism SoT"
+}
