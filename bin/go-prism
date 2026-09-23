@@ -3,4 +3,8 @@ set -euo pipefail
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 export PRISM_EXTS="${PRISM_EXTS:-go}"
 export CODE_PRISM_LANG="${CODE_PRISM_LANG:-go}"
-exec node "$DIR/src/build-sot.mjs" --lang "go" "$@"
+EXTRACT="${PRISM_EXTRACT:-$HOME/bin/prism-extract}"
+if [[ -x "$EXTRACT" ]]; then
+  exec "$EXTRACT" --lang "go" "$@"
+fi
+exec node "$DIR/src/build-sot.mjs" --lang go "$@"
