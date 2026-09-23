@@ -577,14 +577,16 @@ func runFlagMode(_ args: [String]) throws {
 
     emitProgress(phase: "macros", processed: 0, total: 1)
     var allMacros: [MacroInfo] = []
+    let macroTargetResolver = workspaceRoot.map { TargetResolver(workspaceRoot: $0) }
+    let macroTargetIndex = targetIndex(targets)
     for (filePath, tree) in fileSources {
         let macroCollector = MacroCollector(filePath: filePath)
         macroCollector.walk(tree)
         var collected = macroCollector.macros
-        if !targets.isEmpty, let root = workspaceRoot {
-            let targetResolver = TargetResolver(workspaceRoot: root)
+        if !targets.isEmpty {
+            let targetName = macroTargetIndex[filePath] ?? macroTargetResolver?.mapFileToTarget(filePath, targets: targets)
             for idx in collected.indices {
-                collected[idx].targetName = targetResolver.mapFileToTarget(filePath, targets: targets)
+                collected[idx].targetName = targetName
             }
         }
         allMacros.append(contentsOf: collected)
@@ -1060,65 +1062,84 @@ func extractMembers(of parentId: String, from result: AnalysisResult) -> Analysi
 
 func scanFiles(_ filePaths: [String], targets: [ParsedTarget] = [], targetResolver: TargetResolver? = nil) -> ([SymbolInfo], [(path: String, tree: SourceFileSyntax)], [String: [String]], [String: [SourceLocation]]) {
     let extTargets = Set(targets.filter(\.isExternal).map(\.name))
+    let fileToTarget = targetIndex(targets)
+    let totalFiles = filePaths.count
+    emitProgress(phase: "scanning", processed: 0, total: totalFiles)
+
+    struct ParsedFile {
+        var index: Int
+        var path: String
+        var tree: SourceFileSyntax
+        var symbols: [SymbolInfo]
+        var imports: [String]
+        var extensions: [String: [SourceLocation]]
+    }
+
+    let lock = NSLock()
+    var parsed: [ParsedFile] = []
+    parsed.reserveCapacity(filePaths.count)
+    var processed = 0
+
+    DispatchQueue.concurrentPerform(iterations: filePaths.count) { index in
+        let path = filePaths[index]
+        defer {
+            lock.lock()
+            processed += 1
+            if processed == totalFiles || processed % 64 == 0 {
+                emitProgress(phase: "scanning", processed: processed, total: totalFiles)
+            }
+            lock.unlock()
+        }
+        if shouldSkipFile(path) { return }
+        guard let data = FileManager.default.contents(atPath: path),
+              let source = String(data: data, encoding: .utf8) else { return }
+        let tree = Parser.parse(source: source)
+        let collector = SymbolCollector(filePath: path)
+        if targetResolver != nil {
+            collector.currentTarget = fileToTarget[path] ?? targetResolver?.mapFileToTarget(path, targets: targets) ?? ""
+        }
+        collector.externalTargets = extTargets
+        collector.walk(tree)
+        let item = ParsedFile(
+            index: index,
+            path: path,
+            tree: tree,
+            symbols: collector.symbols,
+            imports: collector.fileImports,
+            extensions: collector.extensionLocations
+        )
+        lock.lock()
+        parsed.append(item)
+        lock.unlock()
+    }
+
+    parsed.sort { $0.index < $1.index }
     var allSymbols: [SymbolInfo] = []
     var fileSources: [(path: String, tree: SourceFileSyntax)] = []
     var fileImportsMap: [String: [String]] = [:]
     var extensionLocsMap: [String: [SourceLocation]] = [:]
-    let totalFiles = filePaths.count
-    var processedFiles = 0
-
-    emitProgress(phase: "scanning", processed: 0, total: totalFiles)
-
-    for path in filePaths {
-        if shouldSkipFile(path) {
-            emitWarning("Skipping excluded file: \(path)")
-            processedFiles += 1
-            continue
+    for item in parsed {
+        fileSources.append((path: item.path, tree: item.tree))
+        allSymbols.append(contentsOf: item.symbols)
+        if !item.imports.isEmpty {
+            fileImportsMap[item.path] = item.imports
+            fileImportsMap[URL(fileURLWithPath: item.path).lastPathComponent] = item.imports
         }
-
-        guard let data = FileManager.default.contents(atPath: path),
-              let source = String(data: data, encoding: .utf8) else {
-            emitWarning("Skipping unreadable file: \(path)")
-            processedFiles += 1
-            continue
+        for (typeName, locs) in item.extensions {
+            extensionLocsMap[typeName, default: []].append(contentsOf: locs)
         }
-
-        let tree: SourceFileSyntax
-        do {
-            tree = Parser.parse(source: source)
-        } catch {
-            emitWarning("Skipping unparseable file \(path): \(error)")
-            processedFiles += 1
-            continue
-        }
-
-        fileSources.append((path: path, tree: tree))
-
-        do {
-            let collector = SymbolCollector(filePath: path)
-            if let resolver = targetResolver {
-                collector.currentTarget = resolver.mapFileToTarget(path, targets: targets) ?? ""
-            }
-            collector.externalTargets = extTargets
-            collector.walk(tree)
-            allSymbols.append(contentsOf: collector.symbols)
-            if !collector.fileImports.isEmpty {
-                fileImportsMap[path] = collector.fileImports
-                let basename = URL(fileURLWithPath: path).lastPathComponent
-                fileImportsMap[basename] = collector.fileImports
-            }
-            for (typeName, locs) in collector.extensionLocations {
-                extensionLocsMap[typeName, default: []].append(contentsOf: locs)
-            }
-        } catch {
-            emitWarning("Symbol collection failed for \(path): \(error)")
-        }
-
-        processedFiles += 1
-        emitProgress(phase: "scanning", processed: processedFiles, total: totalFiles)
     }
-
     return (allSymbols, fileSources, fileImportsMap, extensionLocsMap)
+}
+
+private func targetIndex(_ targets: [ParsedTarget]) -> [String: String] {
+    var map: [String: String] = [:]
+    for target in targets {
+        for source in target.sourcePaths {
+            map[source] = target.name
+        }
+    }
+    return map
 }
 
 func shouldSkipFile(_ path: String) -> Bool {
@@ -1228,7 +1249,6 @@ func collectSignatures(filePaths: [String], fileSources: [(path: String, tree: S
 func safeEncodeToJSON<T: Encodable>(_ value: T, label: String) throws -> String {
     emitProgress(phase: "encoding", processed: 0, total: 1)
     let encoder = JSONEncoder()
-    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     do {
         let data = try encoder.encode(value)
         guard let json = String(data: data, encoding: .utf8) else {
