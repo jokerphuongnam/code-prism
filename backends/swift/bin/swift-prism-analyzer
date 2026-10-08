@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
-# Shim: prefer built analyzer from legacy/swift checkout or App Support.
-set -euo pipefail
+# Shim: prefer a built analyzer next to this repo, then legacy, then App Support.
+set -uo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+root="$(cd "$here/../.." && pwd)"
+legacy=""
+if legacy="$(cd "$root/.legacy-backends/swift-prism" 2>/dev/null && pwd)"; then
+  :
+else
+  legacy=""
+fi
 CANDIDATES=(
   "$HOME/Library/Application Support/CodePrism/backends/swift/swift-prism-analyzer"
-  "$(cd "$(dirname "$0")/../../.legacy-backends/swift-prism" 2>/dev/null && pwd)/core/.build/release/swift-prism-analyzer"
-  "$(cd "$(dirname "$0")/../../.legacy-backends/swift-prism" 2>/dev/null && pwd)/extension/bin/swift-prism-analyzer"
-  "~/Documents/Code/code-prism/backends/swift-prism/core/.build/release/swift-prism-analyzer"
-  "~/Documents/Code/code-prism/.legacy-backends/swift-prism/core/.build/release/swift-prism-analyzer"
-  "~/Documents/Code/code-prism/.legacy-backends/swift-prism/extension/bin/swift-prism-analyzer"
+  "$root/backends/swift-prism/core/.build/release/swift-prism-analyzer"
+  "$root/backends/swift-prism/core/.build/arm64-apple-macosx/release/swift-prism-analyzer"
+  "${legacy:+$legacy/core/.build/release/swift-prism-analyzer}"
+  "${legacy:+$legacy/extension/bin/swift-prism-analyzer}"
 )
 for c in "${CANDIDATES[@]}"; do
-  if [[ -x "$c" ]]; then
+  if [[ -n "$c" && -x "$c" ]]; then
     exec "$c" "$@"
   fi
 done
